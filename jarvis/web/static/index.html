@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>JARVIS</title>
+<style>
+  :root {
+    --bg: #0b1220; --panel: #121b2e; --line: #22304d; --text: #e6edf7; --muted: #8a9bb8;
+    --accent: #4cc3ff; --me: #1d3b5c; --err: #ff6b6b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f4f7fb; --panel: #ffffff; --line: #d8e0ec; --text: #142033; --muted: #5d6b82;
+            --accent: #0a7bc2; --me: #dcecfb; --err: #c62828; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  body { display: flex; flex-direction: column; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: 2px; }
+  header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  header .dot.on { background: #3ddc84; box-shadow: 0 0 8px #3ddc84; }
+  nav { margin-left: auto; display: flex; gap: 4px; }
+  nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 6px 10px; border-radius: 8px; font: inherit; cursor: pointer; }
+  nav button.active { color: var(--text); border-color: var(--line); background: var(--panel); }
+  main { flex: 1; overflow: auto; padding: 16px; }
+  .view { display: none; max-width: 760px; margin: 0 auto; }
+  .view.active { display: block; }
+  .msg { padding: 10px 14px; border-radius: 14px; margin: 8px 0; max-width: 88%; white-space: pre-wrap; word-break: break-word; }
+  .msg.me { background: var(--me); margin-left: auto; }
+  .msg.ai { background: var(--panel); border: 1px solid var(--line); }
+  .msg.err { color: var(--err); }
+  .msg .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 10px 0; }
+  .card h3 { margin: 0 0 6px; font-size: 16px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  ol { margin: 6px 0 0; padding-left: 20px; }
+  .done { text-decoration: line-through; color: var(--muted); }
+  footer { border-top: 1px solid var(--line); padding: 10px 12px; }
+  .bar { display: flex; gap: 8px; max-width: 760px; margin: 0 auto; align-items: flex-end; }
+  textarea { flex: 1; resize: none; min-height: 44px; max-height: 160px; padding: 10px 12px; border-radius: 12px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; }
+  .icon { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel);
+    color: var(--text); font-size: 18px; cursor: pointer; flex: none; }
+  .icon.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .icon.live { background: var(--err); color: #fff; }
+  .toggles { display: flex; gap: 14px; max-width: 760px; margin: 0 auto 8px; font-size: 14px; color: var(--muted); }
+  .toggles label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  #login { max-width: 420px; margin: 15vh auto; }
+  #login input { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span><h1>JARVIS</h1>
+  <nav>
+    <button data-view="chat" class="active">대화</button>
+    <button data-view="goals">목표</button>
+    <button data-view="memos">메모</button>
+  </nav>
+</header>
+<main>
+  <section id="login" class="view">
+    <div class="card">
+      <h3>접속 토큰</h3>
+      <p class="muted">JARVIS를 실행한 PC 화면에 표시된 주소로 접속하거나, 토큰을 붙여넣으세요.</p>
+      <input id="tokenInput" placeholder="토큰" autocomplete="off">
+      <p><button class="icon primary" style="width:auto;padding:0 16px" id="saveToken">저장</button></p>
+    </div>
+  </section>
+  <section id="chat" class="view active"><div id="log"></div></section>
+  <section id="goals" class="view"></section>
+  <section id="memos" class="view"></section>
+</main>
+<footer id="composer">
+  <div class="toggles">
+    <label><input type="checkbox" id="memoMode"> 메모로 저장</label>
+    <label><input type="checkbox" id="speak"> 음성으로 듣기</label>
+    <label><button class="icon" style="width:auto;height:auto;padding:2px 8px;font-size:13px" id="newChat">새 대화</button></label>
+  </div>
+  <div class="bar">
+    <button class="icon" id="mic" title="말하기">🎤</button>
+    <textarea id="input" rows="1" placeholder="자비스에게 말하기"></textarea>
+    <button class="icon primary" id="send" title="보내기">➤</button>
+  </div>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
+// Token: taken once from the #token=... link printed by `jarvis serve`, then remembered.
+const hash = new URLSearchParams(location.hash.slice(1));
+if (hash.get("token")) { store.set("jarvis.token", hash.get("token")); history.replaceState(null, "", "/"); }
+let token = store.get("jarvis.token", "");
+const session = store.get("jarvis.session", null) || (() => {
+  const s = Math.random().toString(36).slice(2, 10); store.set("jarvis.session", s); return s; })();
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: { "Authorization": "Bearer " + token, ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 401) { showLogin(); throw new Error("토큰이 맞지 않습니다"); }
+  if (!res.ok) throw new Error("서버 오류 " + res.status);
+  return res.json();
+}
+
+function show(view) {
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === view));
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.view === view));
+  $("composer").style.display = view === "chat" ? "" : "none";
+  if (view === "goals" || view === "memos") loadOverview();
+}
+function showLogin() { show("login"); }
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => show(b.dataset.view));
+$("saveToken").onclick = () => { token = $("tokenInput").value.trim(); store.set("jarvis.token", token); show("chat"); ping(); };
+
+function add(cls, text, meta) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  div.textContent = text;
+  if (meta) { const m = document.createElement("div"); m.className = "meta"; m.textContent = meta; div.appendChild(m); }
+  $("log").appendChild(div);
+  div.scrollIntoView({ block: "end", behavior: "smooth" });
+  return div;
+}
+
+function say(text) {
+  if (!$("speak").checked || !("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "ko-KR";
+  speechSynthesis.speak(u);
+}
+
+let busy = false;
+async function send() {
+  const text = $("input").value.trim();
+  if (!text || busy) return;
+  $("input").value = ""; autosize();
+  add("me", text);
+  busy = true; $("send").disabled = true;
+  try {
+    if ($("memoMode").checked) {
+      const r = await api("/api/memo", { text });
+      add("ai", r.new ? "메모했습니다." : "같은 얘기를 전에도 하셨네요. 중요도를 올려 둘게요.");
+    } else {
+      const pending = add("ai", "생각 중…");
+      const r = await api("/api/chat", { message: text, session });
+      pending.textContent = r.text;
+      if (r.tools.length) { const m = document.createElement("div"); m.className = "meta"; m.textContent = "사용한 도구: " + r.tools.join(", "); pending.appendChild(m); }
+      say(r.text);
+    }
+  } catch (e) { add("ai err", e.message); }
+  busy = false; $("send").disabled = false;
+}
+$("send").onclick = send;
+$("input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 160) + "px"; }
+$("input").addEventListener("input", autosize);
+$("newChat").onclick = async () => { await api("/api/reset", { session }); $("log").innerHTML = ""; };
+
+// Voice input through the browser's own speech recognition (Chrome, Edge, Safari).
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) { $("mic").style.display = "none"; }
+let rec = null;
+$("mic").onclick = () => {
+  if (rec) { rec.stop(); return; }
+  rec = new SR(); rec.lang = "ko-KR"; rec.interimResults = true; rec.continuous = false;
+  $("mic").classList.add("live");
+  rec.onresult = (e) => { $("input").value = Array.from(e.results).map(r => r[0].transcript).join(""); autosize(); };
+  rec.onend = () => { $("mic").classList.remove("live"); rec = null; if ($("input").value.trim()) send(); };
+  rec.onerror = () => { $("mic").classList.remove("live"); rec = null; };
+  rec.start();
+};
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+async function loadOverview() {
+  try {
+    const o = await api("/api/overview");
+    const g = $("goals"); g.innerHTML = "";
+    if (!o.goals.length) g.appendChild(el("p", "muted", "진행 중인 목표가 없습니다. 대화에서 목표를 말해 보세요."));
+    for (const goal of o.goals) {
+      const c = el("div", "card");
+      c.appendChild(el("h3", null, goal.title + (goal.deadline ? `  · ~${goal.deadline}` : "")));
+      if (goal.why) c.appendChild(el("div", "muted", goal.why));
+      const ol = el("ol");
+      for (const s of goal.plan) ol.appendChild(el("li", s.status === "done" ? "done" : "", s.description + (s.status !== "todo" && s.status !== "done" ? ` (${s.status})` : "")));
+      c.appendChild(ol); g.appendChild(c);
+    }
+    const m = $("memos"); m.innerHTML = "";
+    if (!o.memos.length) m.appendChild(el("p", "muted", "아직 메모가 없습니다."));
+    for (const memo of o.memos) {
+      const c = el("div", "card");
+      c.appendChild(el("div", null, memo.text));
+      const imp = memo.importance == null ? "판단 대기" : "중요도 " + memo.importance;
+      c.appendChild(el("div", "muted", `${imp} · ${memo.mentions}회 언급 · ${memo.source} · ${new Date(memo.last_seen_at).toLocaleString()}`));
+      m.appendChild(c);
+    }
+  } catch (e) { /* login view already shown on 401 */ }
+}
+
+async function ping() {
+  try { const r = await fetch("/api/health"); $("dot").classList.toggle("on", r.ok); }
+  catch { $("dot").classList.remove("on"); }
+}
+if (!token) showLogin();
+ping(); setInterval(ping, 30000);
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+</script>
+</body>
+</html>

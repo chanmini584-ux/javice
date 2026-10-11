@@ -137,6 +137,10 @@ class MemoryStore:
         self._db = sqlite3.connect(str(path))
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA foreign_keys = ON")
+        if path != ":memory:":
+            # The daemon, the web server and the CLI may hold connections at the same time.
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(_SCHEMA)
 
     def close(self) -> None:

@@ -102,12 +102,42 @@ jarvis listen                     # 상시 음성 모드 (--no-voice: 브리핑�
 jarvis brief                      # 지금 아침 브리핑
 jarvis consolidate                # 지금 메모 정리
 jarvis collect                    # 지금 자료 수집
+jarvis serve                      # 웹 앱 서버 (pip install -e '.[web]')
 pytest                            # 테스트 (네트워크·마이크 불필요)
 ```
 
 환경 변수: `JARVIS_MODEL`(기본 `claude-opus-5-5`), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`), `JARVIS_CAMERA`(빈 값이면 끔), `JARVIS_DETECTOR_WEIGHTS`(기본 `yolo11n.pt`), `JARVIS_VISION_EVERY_S`(기본 2), `JARVIS_COLLECT_TIME`(기본 `06:30`, 빈 값이면 끔), `JARVIS_KNOWLEDGE_KEEP_DAYS`(기본 90).
 
 CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/think`(추론 요약 표시), `/quit`.
+
+## USB 휴대형 + 웹 앱 (PWA)
+
+JARVIS를 USB에 담아 어느 PC에서든 실행하고, 폰·태블릿·다른 PC에서는 브라우저로 접속해 **앱처럼 설치**해서 씁니다. 폰은 JARVIS를 직접 돌리지 않고, USB를 꽂은 PC(서버)에 붙는 화면입니다.
+
+**1. USB 만들기** (인터넷 되는 PC에서 한 번)
+```bash
+python portable/make_usb.py E:\                       # Windows
+python portable/make_usb.py /Volumes/USB --download-uv  # uv 동봉: Python 없는 PC에서도 실행
+python portable/make_usb.py /media/me/USB --extras web,voice   # 음성 모드까지
+```
+`<USB>/JARVIS/`에 `app/`(코드), `data/`(기억·지식·토큰, 다시 만들어도 보존), `start-windows.bat` / `start-mac.command` / `start-linux.sh`가 생깁니다.
+
+**2. 아무 PC에서 실행**: 런처를 더블클릭하면 첫 실행 때 Python과 패키지를 그 PC의 캐시에 설치합니다. USB 파일 시스템은 가상환경을 담지 못하기 때문입니다. 그다음 서버를 띄우고 `http://127.0.0.1:8765/#token=...` 주소를 보여 줍니다. API 키를 물을 때 USB에 저장하면 다음부터 묻지 않지만, USB를 잃어버리면 키도 노출되니 선택입니다.
+
+**3. 폰에 설치**
+- 같은 와이파이에서 쓰려면 `start-* --host 0.0.0.0`으로 띄우고, 표시된 LAN 주소를 폰에서 엽니다.
+- 홈 화면 설치와 마이크는 브라우저가 **HTTPS에서만** 허용합니다. 가장 쉬운 방법은 PC와 폰에 [Tailscale](https://tailscale.com)을 깔고 PC에서 `tailscale serve 8765`를 실행하는 것입니다. 그러면 `https://<pc이름>.<tailnet>.ts.net/#token=...`으로 집 밖에서도 접속됩니다.
+- 열린 페이지에서 "홈 화면에 추가"(iOS Safari) 또는 "앱 설치"(Android Chrome)를 누르면 됩니다.
+
+웹 앱 기능은 다음과 같습니다.
+- 대화: 기기마다 별도 대화
+- 🎤 음성 입력(브라우저 음성 인식), 답변 읽어 주기
+- "메모로 저장": 음성 모드 메모와 같은 판단·정리 대상이 됩니다.
+- 목표·계획·메모 보기
+
+모든 API는 첫 실행 때 만든 토큰(`data/web_token`)이 있어야 합니다. 토큰을 바꾸려면 파일을 지우고 다시 실행하세요.
+
+`jarvis serve [--host 0.0.0.0] [--port 8765] [--listen]`: `--listen`을 붙이면 웹 서버와 상시 음성 모드를 함께 돌립니다.
 
 ## 로드맵
 
@@ -116,7 +146,8 @@ CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/t
 | **v0.1** | 에이전트 루프, 장기 기억/프로필, 목표·계획 추적, 정확한 계산, 웹 검색, 승인 게이트, CLI |
 | **v0.1.1** | 상시 음성 모드: 화자 인증, 음성 메모, 중요도 기반 자동 정리·삭제, 대화 기반 자동 계획, 음성 명령, 아침 브리핑 |
 | **v0.1.2** | 시각: 교체 가능한 객체탐지기(YOLO/CCTV 모델), 장면 추적, `look` 도구, 사람 감지 기반 브리핑 |
-| **v0.1.3 (현재)** | 매일 지식 수집(IT·수학·기계공학·일상), 전문 검색 도구, 브리핑에 새 자료 반영 |
+| v0.1.3 | 매일 지식 수집(IT·수학·기계공학·일상), 전문 검색 도구, 브리핑에 새 자료 반영 |
+| **v0.1.4 (현재)** | USB 휴대형 실행(Windows/macOS/Linux 런처), 웹 API + 설치형 웹 앱(PWA), 토큰 인증 |
 | v0.2 연결 | MCP 클라이언트로 캘린더·메일·노션·GitHub 등 외부 서비스 연결 → "지금 상황"을 실제 일정/할 일로 판단 |
 | v0.3 능동성 | 스케줄러(아침 브리핑, 마감 임박 알림, 주간 회고), 대화 종료 시 자동 기억 정리·요약 |
 | v0.4 기억 고도화 | 임베딩 기반 의미 검색, 기억 중요도 감쇠/병합, 대화 compaction으로 긴 세션 유지 |
@@ -137,6 +168,8 @@ jarvis/
   voice/        VAD, 화자 인증(성문), STT/TTS/마이크 백엔드
   vision/       카메라, 객체탐지기, 장면 추적, look 도구
   knowledge/    수집처 설정, 피드 수집기, 지식 DB와 검색 도구
+  web/          웹 API(FastAPI)와 설치형 웹 앱(PWA)
   cli.py        터미널 UI와 하위 명령
+portable/       USB 빌더(make_usb.py)와 OS별 런처
 tests/          가짜 클라이언트로 루프 전체를 검증하는 단위 테스트
 ```

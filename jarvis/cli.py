@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
@@ -107,7 +108,7 @@ def cmd_enroll(settings: Settings) -> int:
     return 0
 
 
-def cmd_listen(settings: Settings, with_voice: bool) -> int:
+def _make_daemon(settings: Settings, with_voice: bool):
     from .consolidate import Consolidator
     from .daemon import Daemon
 
@@ -119,16 +120,86 @@ def cmd_listen(settings: Settings, with_voice: bool) -> int:
 
         vp = _make_voiceprint(settings)
         if not vp.enrolled:
-            print("등록된 목소리가 없습니다. 먼저 `jarvis enroll`을 실행하세요.")
-            return 1
+            raise SystemExit("등록된 목소리가 없습니다. 먼저 `jarvis enroll`을 실행하세요.")
         listener = VoiceListener(Microphone(), vp, WhisperTranscriber(settings.whisper_model, settings.language))
-    daemon = Daemon(
+    return Daemon(
         jarvis,
         listener,
         _make_speaker(),
         Consolidator(jarvis.client, jarvis.store, settings),
         collect_job=_collect_job(settings),
     )
+
+
+def _ensure_api_key(settings: Settings) -> None:
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return
+    import getpass
+
+    key = getpass.getpass("Anthropic API 키 (입력 내용은 보이지 않습니다): ").strip()
+    if not key:
+        raise SystemExit("API 키가 필요합니다.")
+    os.environ["ANTHROPIC_API_KEY"] = key
+    path = settings.data_dir / SECRETS_FILE
+    answer = input(f"{path}에 저장할까요? USB를 잃어버리면 키가 노출될 수 있습니다. [y/N] ")
+    if answer.strip().lower() in ("y", "yes"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"ANTHROPIC_API_KEY={key}\n", encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
+def _lan_addresses() -> list[str]:
+    import socket
+
+    addrs = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))  # no packet is sent; this just picks the LAN interface
+            addrs.add(s.getsockname()[0])
+    except OSError:
+        pass
+    return sorted(a for a in addrs if not a.startswith("127."))
+
+
+def cmd_serve(settings: Settings, argv: list[str]) -> int:
+    import threading
+
+    import uvicorn
+
+    from .web.server import create_app, load_or_create_token
+
+    parser = argparse.ArgumentParser(prog="jarvis serve")
+    parser.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to allow phones on the same network")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--listen", action="store_true", help="also run the always-on voice mode")
+    parser.add_argument("--no-voice", action="store_true", help="with --listen: briefing/collection only")
+    args = parser.parse_args(argv)
+
+    _ensure_api_key(settings)
+    token = load_or_create_token(settings.data_dir / "web_token")
+    app = create_app(lambda: _make_jarvis(settings), token)
+
+    if args.listen:
+        def run_daemon() -> None:
+            _make_daemon(settings, with_voice=not args.no_voice).run()
+
+        threading.Thread(target=run_daemon, name="jarvis-daemon", daemon=True).start()
+
+    hosts = ["127.0.0.1"] + (_lan_addresses() if args.host == "0.0.0.0" else [])
+    print("\nJARVIS 웹 앱 주소 (처음 한 번 이 주소로 열면 토큰이 저장됩니다):")
+    for h in hosts:
+        print(f"  http://{h}:{args.port}/#token={token}")
+    if args.host == "0.0.0.0":
+        print("휴대폰에서 앱으로 설치하고 마이크를 쓰려면 HTTPS가 필요합니다. README의 'Tailscale' 항목을 참고하세요.")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
+def cmd_listen(settings: Settings, with_voice: bool) -> int:
+    daemon = _make_daemon(settings, with_voice)
     try:
         daemon.run()
     except KeyboardInterrupt:
@@ -138,9 +209,26 @@ def cmd_listen(settings: Settings, with_voice: bool) -> int:
     return 0
 
 
+SECRETS_FILE = "secrets.env"
+
+
+def _load_secrets(settings: Settings) -> None:
+    """Load KEY=VALUE lines from <JARVIS_HOME>/secrets.env without overriding the environment."""
+    path = settings.data_dir / SECRETS_FILE
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep and key and not key.startswith("#"):
+            os.environ.setdefault(key.strip(), value.strip())
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     settings = Settings.from_env()
+    _load_secrets(settings)
+    if argv and argv[0] == "serve":
+        return cmd_serve(settings, argv[1:])
     if argv and argv[0] == "enroll":
         return cmd_enroll(settings)
     if argv and argv[0] == "listen":
@@ -165,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Personal AI agent on Claude.",
         epilog="subcommands: enroll (register your voice), listen [--no-voice] (always-on mode), "
         "brief (morning briefing now), consolidate (judge pending voice memos now), "
-        "collect (fetch today's articles now; sources in ~/.jarvis/sources.json)",
+        "collect (fetch today's articles now; sources in ~/.jarvis/sources.json), "
+        "serve [--host 0.0.0.0] [--listen] (web app for any browser or phone)",
     )
     parser.add_argument("prompt", nargs="*", help="one-shot prompt; omit for interactive mode")
     args = parser.parse_args(argv)
