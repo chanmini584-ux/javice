@@ -41,29 +41,57 @@ Claude API(Opus 5.5) 위에 **장기 기억 · 목표/계획 · 도구 실행 ·
 - **append-only 대화 기록**: thinking 블록은 만들어진 대화 이력에 묶여 있어서 이전 턴을 수정하지 않습니다. 중간에 실패한 턴만 통째로 롤백합니다.
 - **도구 추가가 쉬움**: `registry.tool(...)` 데코레이터 한 줄로 새 기능(캘린더, 메일, 파일 등)을 붙이고 `risk="confirm"`으로 승인 대상을 지정합니다.
 
+## 상시 음성 모드 (전원 ON)
+
+`jarvis listen`을 켜두면 마이크를 계속 듣습니다.
+
+```
+마이크 ─► VAD(발화 구간 분리) ─► 화자 인증(ECAPA 성문 vs 내 목소리)
+                                   ├─ 다른 사람: 개수만 세고 버림 (전사·저장 안 함)
+                                   └─ 나: Whisper로 전사
+                                         ├─ "자비스, …"로 시작: 명령으로 실행하고 음성으로 답함
+                                         └─ 그 외: 음성 메모로 저장 (비슷한 말을 또 하면 언급 횟수 +1)
+15분마다 또는 메모 20개가 쌓이면 ─► 자비스가 메모 판단 (Claude 구조화 출력)
+   · 메모별 중요도 1~5, 장기 기억으로 승격 / 메모로 유지 / 삭제
+   · 말 속에서 새 목표와 단계별 계획을 만들고, 기존 계획 진행 상황을 갱신
+   · 유지된 메모는 중요도별 보관 기간(1일·3일·7일·30일·영구)이 지나면 자동 삭제.
+     다시 언급하면 기간이 늘어나고 재판단을 받음
+매일 07:30 ─► 아침 브리핑 (마감 임박 목표, 오늘 할 일 3가지, 어제 한 말 중 챙길 것) 음성 출력
+```
+
+- 성문 등록: `jarvis enroll` (예문 5개를 4초씩 읽음, `~/.jarvis/voiceprint.npy`)
+- 모든 음성 처리는 로컬에서 합니다(STT faster-whisper, 화자 인증 SpeechBrain). 외부로 나가는 건 판단·대화를 위한 텍스트뿐입니다.
+- 사람이 키보드 앞에 없는 모드라서 승인이 필요한 도구(`run_python`)는 자동으로 거절됩니다.
+- 화자 인증 임계값은 `JARVIS_OWNER_THRESHOLD`(기본 0.5)로 조정합니다. 다른 사람이 내 메모로 들어오면 올리고, 내 말이 빠지면 내립니다.
+
 ## 실행
 
 ```bash
-pip install -e '.[dev]'
+pip install -e '.[dev]'           # 음성까지 쓰려면 '.[dev,voice]'
 export ANTHROPIC_API_KEY=sk-ant-...
-jarvis                       # 대화형
-jarvis "이번 주 목표 정리해줘"   # 원샷
-pytest                       # 테스트 (네트워크 불필요)
+jarvis                            # 대화형
+jarvis "이번 주 목표 정리해줘"        # 원샷
+jarvis enroll                     # 내 목소리 등록
+jarvis listen                     # 상시 음성 모드 (--no-voice: 브리핑·정리만)
+jarvis brief                      # 지금 아침 브리핑
+jarvis consolidate                # 지금 메모 정리
+pytest                            # 테스트 (네트워크·마이크 불필요)
 ```
 
-환경 변수: `JARVIS_MODEL`(기본 `claude-opus-5-5`), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기).
+환경 변수: `JARVIS_MODEL`(기본 `claude-opus-5-5`), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`).
 
-CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/new`, `/think`(추론 요약 표시), `/quit`.
+CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/think`(추론 요약 표시), `/quit`.
 
 ## 로드맵
 
 | 단계 | 내용 |
 |---|---|
-| **v0.1 (현재)** | 에이전트 루프, 장기 기억/프로필, 목표·계획 추적, 정확한 계산, 웹 검색, 승인 게이트, CLI |
+| **v0.1** | 에이전트 루프, 장기 기억/프로필, 목표·계획 추적, 정확한 계산, 웹 검색, 승인 게이트, CLI |
+| **v0.1.1 (현재)** | 상시 음성 모드: 화자 인증, 음성 메모, 중요도 기반 자동 정리·삭제, 대화 기반 자동 계획, 음성 명령, 아침 브리핑 |
 | v0.2 연결 | MCP 클라이언트로 캘린더·메일·노션·GitHub 등 외부 서비스 연결 → "지금 상황"을 실제 일정/할 일로 판단 |
 | v0.3 능동성 | 스케줄러(아침 브리핑, 마감 임박 알림, 주간 회고), 대화 종료 시 자동 기억 정리·요약 |
 | v0.4 기억 고도화 | 임베딩 기반 의미 검색, 기억 중요도 감쇠/병합, 대화 compaction으로 긴 세션 유지 |
-| v0.5 인터페이스 | 음성 입출력(STT/TTS), 웹/모바일 UI, 알림 채널(텔레그램·슬랙) |
+| v0.5 인터페이스 | 자연스러운 TTS, 끼어들기(barge-in), 웹/모바일 UI, 알림 채널(텔레그램·슬랙) |
 | v0.6 다중 에이전트 | 리서치·코딩·일정 담당 하위 에이전트로 분업, 결과를 메인 에이전트가 검증 |
 
 ## 구조
@@ -74,6 +102,10 @@ jarvis/
   memory.py     SQLite 기억 저장소 (profile / memories / goals / plan_steps)
   prompts.py    시스템 프롬프트, 매 턴 상황 블록
   tools/        도구 레지스트리와 기본 도구
-  cli.py        터미널 UI
+  consolidate.py 음성 메모 판단 → 기억 승격·삭제, 목표·계획 생성
+  daemon.py     상시 모드 (듣기, 명령, 주기적 정리, 아침 브리핑)
+  briefing.py   아침 브리핑 프롬프트와 스케줄
+  voice/        VAD, 화자 인증(성문), STT/TTS/마이크 백엔드
+  cli.py        터미널 UI와 하위 명령
 tests/          가짜 클라이언트로 루프 전체를 검증하는 단위 테스트
 ```

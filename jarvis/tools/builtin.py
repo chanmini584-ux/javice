@@ -108,6 +108,18 @@ def register_builtin_tools(registry: ToolRegistry, store: MemoryStore) -> None:
         store.set_profile(key.strip().lower(), value.strip())
         return "profile updated"
 
+    @registry.tool(
+        "search_memos",
+        "Search voice memos: things the user said out loud while JARVIS was listening. "
+        "Empty query lists the most recent ones.",
+        {"query": {"type": "string"}},
+    )
+    def search_memos(query: str) -> list[dict]:
+        memos = store.memos(limit=200 if query.strip() else 20)
+        terms = query.lower().split()
+        hits = [m for m in memos if all(t in m.text.lower() for t in terms)]
+        return [asdict(m) for m in hits[:20]]
+
     # --- goals & plans -------------------------------------------------------
 
     @registry.tool(

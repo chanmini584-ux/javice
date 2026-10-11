@@ -67,5 +67,9 @@ def situation_block(store: MemoryStore, now: datetime | None = None) -> str:
             lines.append(f"  - #{g.id} {g.title}{due} [{done}/{len(steps)} steps done]")
             if nxt:
                 lines.append(f"      next: step #{nxt.id} ({nxt.status}) {nxt.description}")
+    memos = store.memos(limit=5)
+    if memos:
+        lines.append("recent things the user said aloud (voice memos):")
+        lines += [f"  - #{m.id} {m.text}" + (f" (x{m.mentions})" if m.mentions > 1 else "") for m in memos]
     lines.append("</situation>")
     return "\n".join(lines)

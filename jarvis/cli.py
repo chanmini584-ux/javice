@@ -15,6 +15,7 @@ commands:
   /profile            show your stored profile
   /memories [query]   search long-term memory
   /goals              show active goals and plans
+  /memos              show recent voice memos
   /new                start a fresh conversation (memory is kept)
   /think              toggle showing Claude's reasoning summary
   /quit               exit
@@ -28,8 +29,98 @@ def _approve(name: str, tool_input: dict[str, Any]) -> bool:
     return input("allow? [y/N] ").strip().lower() in ("y", "yes")
 
 
+ENROLL_SENTENCES = [
+    "안녕 자비스, 지금부터 내 목소리를 기억해 줘.",
+    "오늘 해야 할 일을 정리하고 우선순위를 알려줘.",
+    "다음 주까지 프로젝트 계획을 세워야 해.",
+    "점심 먹고 나서 운동하러 갈 거야.",
+    "이 숫자들을 계산해서 평균을 알려줄래?",
+]
+
+
+def _make_speaker():
+    from .voice.backends import PrintSpeaker, SystemSpeaker
+
+    try:
+        return SystemSpeaker()
+    except Exception:  # no TTS engine installed
+        return PrintSpeaker()
+
+
+def _make_voiceprint(settings: Settings):
+    from .voice.speaker_id import EcapaEmbedder, VoicePrint
+
+    embedder = EcapaEmbedder(cache_dir=settings.data_dir / "models" / "ecapa")
+    return VoicePrint(embedder, settings.voiceprint_path, settings.owner_threshold)
+
+
+def cmd_enroll(settings: Settings) -> int:
+    from .voice.backends import Microphone
+
+    mic, vp = Microphone(), _make_voiceprint(settings)
+    print("목소리 등록: 문장이 보이면 Enter를 누르고 4초 동안 자연스럽게 읽어주세요.")
+    samples = []
+    for i, sentence in enumerate(ENROLL_SENTENCES, start=1):
+        input(f"\n[{i}/{len(ENROLL_SENTENCES)}] \"{sentence}\"  (Enter로 녹음 시작)")
+        samples.append(mic.record(4.0))
+    worst = vp.enroll(samples)
+    print(f"\n등록 완료: {settings.voiceprint_path}")
+    print(f"가장 낮은 샘플 일치도 {worst:.2f} (임계값 {settings.owner_threshold:.2f})")
+    if worst < settings.owner_threshold + 0.1:
+        print("일치도가 낮습니다. 조용한 곳에서 다시 등록하는 걸 권합니다.")
+    return 0
+
+
+def cmd_listen(settings: Settings, with_voice: bool) -> int:
+    from .consolidate import Consolidator
+    from .daemon import Daemon
+
+    jarvis = Jarvis(settings)  # approvals default to "deny" when nobody is at the keyboard
+    listener = None
+    if with_voice:
+        from .voice.backends import Microphone, WhisperTranscriber
+        from .voice.listener import VoiceListener
+
+        vp = _make_voiceprint(settings)
+        if not vp.enrolled:
+            print("등록된 목소리가 없습니다. 먼저 `jarvis enroll`을 실행하세요.")
+            return 1
+        listener = VoiceListener(Microphone(), vp, WhisperTranscriber(settings.whisper_model, settings.language))
+    daemon = Daemon(jarvis, listener, _make_speaker(), Consolidator(jarvis.client, jarvis.store, settings))
+    try:
+        daemon.run()
+    except KeyboardInterrupt:
+        daemon.stop()
+        print("\nstopping; consolidating pending memos...")
+        daemon.consolidate()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="jarvis", description="Personal AI agent on Claude.")
+    argv = sys.argv[1:] if argv is None else argv
+    settings = Settings.from_env()
+    if argv and argv[0] == "enroll":
+        return cmd_enroll(settings)
+    if argv and argv[0] == "listen":
+        return cmd_listen(settings, with_voice="--no-voice" not in argv)
+    if argv and argv[0] in ("brief", "consolidate"):
+        from .consolidate import Consolidator
+        from .daemon import Daemon
+
+        jarvis = Jarvis(settings)
+        daemon = Daemon(jarvis, None, _make_speaker(), Consolidator(jarvis.client, jarvis.store, settings))
+        if argv[0] == "brief":
+            daemon.brief()
+        else:
+            daemon.consolidate()
+        return 0
+
+    parser = argparse.ArgumentParser(
+        prog="jarvis",
+        description="Personal AI agent on Claude.",
+        epilog="subcommands: enroll (register your voice), listen [--no-voice] (always-on mode), "
+        "brief (morning briefing now), consolidate (judge pending voice memos now)",
+    )
     parser.add_argument("prompt", nargs="*", help="one-shot prompt; omit for interactive mode")
     args = parser.parse_args(argv)
 
@@ -44,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         elif kind == "server_tool":
             print(f"  · {data['name']}({json.dumps(data['input'], ensure_ascii=False)[:120]})", file=sys.stderr)
 
-    jarvis = Jarvis(Settings.from_env(), approve=_approve, on_event=on_event)
+    jarvis = Jarvis(settings, approve=_approve, on_event=on_event)
 
     if args.prompt:
         print(jarvis.ask(" ".join(args.prompt)).text)
@@ -75,6 +166,10 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"#{g.id} {g.title}" + (f" (due {g.deadline})" if g.deadline else ""))
                     for s in jarvis.store.plan(g.id):
                         print(f"   {s.idx}. [{s.status}] {s.description}  (step #{s.id})")
+            elif cmd == "/memos":
+                for m in jarvis.store.memos(limit=20):
+                    imp = m.importance if m.importance is not None else "?"
+                    print(f"#{m.id} [{m.status}, 중요도 {imp}, {m.mentions}회] {m.text}")
             elif cmd == "/new":
                 jarvis.reset()
                 print("new conversation.")

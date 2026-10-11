@@ -16,10 +16,21 @@ class Settings:
     max_steps: int = 25  # upper bound on model<->tool round trips per user turn
     data_dir: Path = field(default_factory=lambda: Path.home() / ".jarvis")
     enable_web_search: bool = True
+    # voice / daemon
+    briefing_time: str = "07:30"  # local HH:MM; empty disables the morning briefing
+    consolidate_every_min: int = 15
+    consolidate_after_memos: int = 20  # also consolidate early once this many are pending
+    owner_threshold: float = 0.5  # cosine score needed to accept a voice as yours
+    whisper_model: str = "small"
+    language: str = "ko"
 
     @property
     def db_path(self) -> Path:
         return self.data_dir / "memory.db"
+
+    @property
+    def voiceprint_path(self) -> Path:
+        return self.data_dir / "voiceprint.npy"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -31,4 +42,10 @@ class Settings:
             max_steps=int(env.get("JARVIS_MAX_STEPS", cls.max_steps)),
             data_dir=Path(env.get("JARVIS_HOME", Path.home() / ".jarvis")),
             enable_web_search=env.get("JARVIS_WEB_SEARCH", "1") != "0",
+            briefing_time=env.get("JARVIS_BRIEFING_TIME", cls.briefing_time),
+            consolidate_every_min=int(env.get("JARVIS_CONSOLIDATE_MIN", cls.consolidate_every_min)),
+            consolidate_after_memos=int(env.get("JARVIS_CONSOLIDATE_AFTER", cls.consolidate_after_memos)),
+            owner_threshold=float(env.get("JARVIS_OWNER_THRESHOLD", cls.owner_threshold)),
+            whisper_model=env.get("JARVIS_WHISPER_MODEL", cls.whisper_model),
+            language=env.get("JARVIS_LANGUAGE", cls.language),
         )

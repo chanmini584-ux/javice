@@ -9,12 +9,19 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MEMORY_KINDS = ("fact", "preference", "weakness", "strength", "event", "insight")
 GOAL_STATUSES = ("active", "done", "dropped")
 STEP_STATUSES = ("todo", "doing", "done", "blocked")
+MEMO_STATUSES = ("pending", "kept", "promoted")
+
+# How long a voice memo survives without being mentioned again, by importance.
+# None = keep until JARVIS or the user removes it. Re-mentioning resets the clock.
+MEMO_TTL_DAYS: dict[int, float | None] = {1: 1, 2: 3, 3: 7, 4: 30, 5: None}
+# Two memos whose character-bigram Jaccard similarity reaches this are "the same topic".
+REMENTION_SIMILARITY = 0.5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS profile (
@@ -44,11 +51,36 @@ CREATE TABLE IF NOT EXISTS plan_steps (
     description TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'todo'
 );
+CREATE TABLE IF NOT EXISTS memos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'voice',
+    importance INTEGER,
+    mentions INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _bigrams(text: str) -> set[str]:
+    t = "".join(text.lower().split())
+    return {t[i : i + 2] for i in range(len(t) - 1)} or {t}
+
+
+def similarity(a: str, b: str) -> float:
+    """Character-bigram Jaccard similarity; language-agnostic, works for Korean."""
+    x, y = _bigrams(a), _bigrams(b)
+    return len(x & y) / len(x | y) if x | y else 0.0
 
 
 @dataclass
@@ -58,6 +90,18 @@ class Memory:
     content: str
     importance: int
     created_at: str
+
+
+@dataclass
+class Memo:
+    id: int
+    text: str
+    source: str
+    importance: int | None
+    mentions: int
+    status: str
+    created_at: str
+    last_seen_at: str
 
 
 @dataclass
@@ -206,3 +250,99 @@ class MemoryStore:
         with self._db:
             cur = self._db.execute("UPDATE plan_steps SET status = ? WHERE id = ?", (status, step_id))
         return cur.rowcount > 0
+
+    # --- voice memos -------------------------------------------------------
+
+    def add_memo(self, text: str, source: str = "voice", now: datetime | None = None) -> tuple[int, bool]:
+        """Store what the user said. If it repeats a recent memo, count a re-mention instead.
+
+        Returns (memo_id, is_new).
+        """
+        ts = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+        text = text.strip()
+        best: tuple[float, Memo] | None = None
+        for memo in self.memos(limit=200):
+            score = similarity(text, memo.text)
+            if score >= REMENTION_SIMILARITY and (best is None or score > best[0]):
+                best = (score, memo)
+        with self._db:
+            if best:
+                self._db.execute(
+                    # A re-mentioned "kept" memo goes back to JARVIS for re-judgment.
+                    "UPDATE memos SET mentions = mentions + 1, last_seen_at = ?, "
+                    "status = CASE WHEN status = 'kept' THEN 'pending' ELSE status END WHERE id = ?",
+                    (ts, best[1].id),
+                )
+                return best[1].id, False
+            cur = self._db.execute(
+                "INSERT INTO memos(text, source, created_at, last_seen_at) VALUES (?, ?, ?, ?)",
+                (text, source, ts, ts),
+            )
+        return int(cur.lastrowid), True
+
+    def memos(self, status: str | None = None, limit: int = 50, since: datetime | None = None) -> list[Memo]:
+        sql, params = "SELECT * FROM memos", []
+        where = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if since:
+            where.append("last_seen_at >= ?")
+            params.append(since.astimezone(timezone.utc).isoformat(timespec="seconds"))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY last_seen_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        return [Memo(**dict(r)) for r in self._db.execute(sql, params)]
+
+    def update_memo(self, memo_id: int, importance: int | None = None, status: str | None = None) -> bool:
+        if status is not None and status not in MEMO_STATUSES:
+            raise ValueError(f"status must be one of {MEMO_STATUSES}")
+        sets, params = [], []
+        if importance is not None:
+            sets.append("importance = ?")
+            params.append(max(1, min(5, int(importance))))
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+        if not sets:
+            return False
+        with self._db:
+            cur = self._db.execute(f"UPDATE memos SET {', '.join(sets)} WHERE id = ?", (*params, memo_id))
+        return cur.rowcount > 0
+
+    def delete_memo(self, memo_id: int) -> bool:
+        with self._db:
+            cur = self._db.execute("DELETE FROM memos WHERE id = ?", (memo_id,))
+        return cur.rowcount > 0
+
+    def prune_memos(self, now: datetime | None = None) -> list[int]:
+        """Delete judged memos that outlived their importance-based TTL. Pending ones wait for judgment."""
+        now = now or datetime.now(timezone.utc)
+        doomed = []
+        for memo in self.memos(limit=10_000):
+            if memo.status == "pending" or memo.importance is None:
+                continue
+            ttl = MEMO_TTL_DAYS.get(memo.importance)
+            if ttl is None:
+                continue
+            # Each extra mention buys more time: the user keeps coming back to it.
+            ttl *= memo.mentions
+            if datetime.fromisoformat(memo.last_seen_at) + timedelta(days=ttl) < now:
+                doomed.append(memo.id)
+        with self._db:
+            self._db.executemany("DELETE FROM memos WHERE id = ?", [(i,) for i in doomed])
+        return doomed
+
+    # --- internal key/value state (not shown to the model) ----------------
+
+    def get_state(self, key: str, default: str | None = None) -> str | None:
+        row = self._db.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_state(self, key: str, value: str) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
