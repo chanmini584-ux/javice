@@ -64,6 +64,23 @@ Claude API(Opus 5.5) 위에 **장기 기억 · 목표/계획 · 도구 실행 ·
 - 사람이 키보드 앞에 없는 모드라서 승인이 필요한 도구(`run_python`)는 자동으로 거절됩니다.
 - 화자 인증 임계값은 `JARVIS_OWNER_THRESHOLD`(기본 0.5)로 조정합니다. 다른 사람이 내 메모로 들어오면 올리고, 내 말이 빠지면 내립니다.
 
+## 지식 수집 (매일)
+
+매일 06:30에 관심 분야의 새 글과 논문을 모아 로컬 지식 DB(`~/.jarvis/knowledge.db`)에 쌓습니다. 자비스는 대화 중 `search_knowledge`로 검색해 근거(링크)와 함께 답하고, 아침 브리핑에서 "볼 만한 새 자료"를 골라 알려줍니다.
+
+| 분야 | 기본 수집처 |
+|---|---|
+| IT·AI | GeekNews(본문 포함), Hacker News, arXiv cs.AI·cs.LG |
+| 수학 | Quanta Magazine(본문 포함), arXiv math.HO |
+| 기계공학 | arXiv cs.RO(로보틱스)·eess.SY(제어), IEEE Spectrum |
+| 일상 | 연합뉴스 최신 |
+
+- 수집처는 처음 실행 때 생기는 `~/.jarvis/sources.json`을 고쳐서 추가하거나 뺍니다. RSS/Atom 피드면 됩니다.
+- **예의 바른 수집**: 피드 위주로 읽고, 본문을 받을 때는 robots.txt를 지키며, 같은 사이트에 1초 간격을 두고, 이미 받은 글은 건너뜁니다. 90일 지난 글은 지웁니다(`JARVIS_KNOWLEDGE_KEEP_DAYS`).
+- 검색은 SQLite FTS5 trigram이라 한국어 단어 안쪽까지 찾습니다. 의미 기반 검색(임베딩)은 로드맵 v0.4에 있습니다.
+- 수집한 글은 신뢰할 수 없는 데이터로 취급하도록 시스템 프롬프트에 명시해, 글 속 지시문에 자비스가 휘둘리지 않게 했습니다.
+- 지금 바로 받으려면 `jarvis collect`. 본문 추출 품질을 높이려면 `pip install trafilatura`(없으면 기본 추출기 사용).
+
 ## 시각 (객체탐지)
 
 카메라와 객체탐지 모델을 자비스의 "눈"으로 연결합니다. `JARVIS_CAMERA=0`(웹캠 번호 또는 RTSP/HTTP 주소)을 설정하면 켜집니다.
@@ -84,10 +101,11 @@ jarvis enroll                     # 내 목소리 등록
 jarvis listen                     # 상시 음성 모드 (--no-voice: 브리핑·정리만)
 jarvis brief                      # 지금 아침 브리핑
 jarvis consolidate                # 지금 메모 정리
+jarvis collect                    # 지금 자료 수집
 pytest                            # 테스트 (네트워크·마이크 불필요)
 ```
 
-환경 변수: `JARVIS_MODEL`(기본 `claude-opus-5-5`), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`), `JARVIS_CAMERA`(빈 값이면 끔), `JARVIS_DETECTOR_WEIGHTS`(기본 `yolo11n.pt`), `JARVIS_VISION_EVERY_S`(기본 2).
+환경 변수: `JARVIS_MODEL`(기본 `claude-opus-5-5`), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`), `JARVIS_CAMERA`(빈 값이면 끔), `JARVIS_DETECTOR_WEIGHTS`(기본 `yolo11n.pt`), `JARVIS_VISION_EVERY_S`(기본 2), `JARVIS_COLLECT_TIME`(기본 `06:30`, 빈 값이면 끔), `JARVIS_KNOWLEDGE_KEEP_DAYS`(기본 90).
 
 CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/think`(추론 요약 표시), `/quit`.
 
@@ -97,7 +115,8 @@ CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/t
 |---|---|
 | **v0.1** | 에이전트 루프, 장기 기억/프로필, 목표·계획 추적, 정확한 계산, 웹 검색, 승인 게이트, CLI |
 | **v0.1.1** | 상시 음성 모드: 화자 인증, 음성 메모, 중요도 기반 자동 정리·삭제, 대화 기반 자동 계획, 음성 명령, 아침 브리핑 |
-| **v0.1.2 (현재)** | 시각: 교체 가능한 객체탐지기(YOLO/CCTV 모델), 장면 추적, `look` 도구, 사람 감지 기반 브리핑 |
+| **v0.1.2** | 시각: 교체 가능한 객체탐지기(YOLO/CCTV 모델), 장면 추적, `look` 도구, 사람 감지 기반 브리핑 |
+| **v0.1.3 (현재)** | 매일 지식 수집(IT·수학·기계공학·일상), 전문 검색 도구, 브리핑에 새 자료 반영 |
 | v0.2 연결 | MCP 클라이언트로 캘린더·메일·노션·GitHub 등 외부 서비스 연결 → "지금 상황"을 실제 일정/할 일로 판단 |
 | v0.3 능동성 | 스케줄러(아침 브리핑, 마감 임박 알림, 주간 회고), 대화 종료 시 자동 기억 정리·요약 |
 | v0.4 기억 고도화 | 임베딩 기반 의미 검색, 기억 중요도 감쇠/병합, 대화 compaction으로 긴 세션 유지 |
@@ -117,6 +136,7 @@ jarvis/
   briefing.py   아침 브리핑 프롬프트와 스케줄
   voice/        VAD, 화자 인증(성문), STT/TTS/마이크 백엔드
   vision/       카메라, 객체탐지기, 장면 추적, look 도구
+  knowledge/    수집처 설정, 피드 수집기, 지식 DB와 검색 도구
   cli.py        터미널 UI와 하위 명령
 tests/          가짜 클라이언트로 루프 전체를 검증하는 단위 테스트
 ```

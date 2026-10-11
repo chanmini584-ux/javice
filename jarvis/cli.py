@@ -65,10 +65,29 @@ def _make_eyes(settings: Settings, store):
 
 
 def _make_jarvis(settings: Settings, **kwargs) -> Jarvis:
+    from .knowledge import KnowledgeBase
     from .memory import MemoryStore
 
     store = MemoryStore(settings.db_path)
-    return Jarvis(settings, store=store, eyes=_make_eyes(settings, store), **kwargs)
+    kb = KnowledgeBase(settings.knowledge_path)
+    return Jarvis(settings, store=store, eyes=_make_eyes(settings, store), knowledge=kb, **kwargs)
+
+
+def _collect_job(settings: Settings, log=print):
+    """Build the daily collection job. It opens its own DB connection (it runs on another thread)."""
+
+    def job() -> str:
+        from .knowledge import Collector, KnowledgeBase, load_sources
+
+        kb = KnowledgeBase(settings.knowledge_path)
+        try:
+            report = Collector(kb).collect(load_sources(settings.sources_path), log=log)
+            pruned = kb.prune(settings.knowledge_keep_days)
+            return f"{report.summary()}, pruned {pruned}, total {kb.count()}"
+        finally:
+            kb.close()
+
+    return job
 
 
 def cmd_enroll(settings: Settings) -> int:
@@ -103,7 +122,13 @@ def cmd_listen(settings: Settings, with_voice: bool) -> int:
             print("등록된 목소리가 없습니다. 먼저 `jarvis enroll`을 실행하세요.")
             return 1
         listener = VoiceListener(Microphone(), vp, WhisperTranscriber(settings.whisper_model, settings.language))
-    daemon = Daemon(jarvis, listener, _make_speaker(), Consolidator(jarvis.client, jarvis.store, settings))
+    daemon = Daemon(
+        jarvis,
+        listener,
+        _make_speaker(),
+        Consolidator(jarvis.client, jarvis.store, settings),
+        collect_job=_collect_job(settings),
+    )
     try:
         daemon.run()
     except KeyboardInterrupt:
@@ -120,6 +145,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_enroll(settings)
     if argv and argv[0] == "listen":
         return cmd_listen(settings, with_voice="--no-voice" not in argv)
+    if argv and argv[0] == "collect":
+        print(_collect_job(settings)())
+        return 0
     if argv and argv[0] in ("brief", "consolidate"):
         from .consolidate import Consolidator
         from .daemon import Daemon
@@ -136,7 +164,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="jarvis",
         description="Personal AI agent on Claude.",
         epilog="subcommands: enroll (register your voice), listen [--no-voice] (always-on mode), "
-        "brief (morning briefing now), consolidate (judge pending voice memos now)",
+        "brief (morning briefing now), consolidate (judge pending voice memos now), "
+        "collect (fetch today's articles now; sources in ~/.jarvis/sources.json)",
     )
     parser.add_argument("prompt", nargs="*", help="one-shot prompt; omit for interactive mode")
     args = parser.parse_args(argv)

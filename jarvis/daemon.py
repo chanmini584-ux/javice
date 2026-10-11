@@ -21,6 +21,11 @@ from .voice.listener import VoiceListener
 
 WAKE_WORD = re.compile(r"^\s*(?:헤이\s*)?(?:자비스|자빗|jarvis)[\s,.!?~]*", re.IGNORECASE)
 LAST_BRIEFING_KEY = "last_briefing_date"
+LAST_COLLECT_KEY = "last_collect_date"
+
+
+def _in_background(job: Callable[[], None]) -> None:
+    threading.Thread(target=job, name="jarvis-collector", daemon=True).start()
 
 
 class Daemon:
@@ -32,7 +37,14 @@ class Daemon:
         consolidator: Consolidator,
         clock: Callable[[], datetime] = lambda: datetime.now().astimezone(),
         log: Callable[[str], None] = print,
+        collect_job: Callable[[], str] | None = None,
+        run_job: Callable[[Callable[[], None]], None] = _in_background,
     ) -> None:
+        # Daily knowledge collection runs off the main thread (it can take minutes) and
+        # must open its own database connection; it returns a one-line report.
+        self.collect_job = collect_job
+        self.run_job = run_job
+        self._collecting = threading.Event()
         # Optional camera: reuses the agent's eyes so `look` and the watcher share one camera.
         self.eyes = jarvis.eyes
         self.jarvis = jarvis
@@ -44,6 +56,7 @@ class Daemon:
         self.log = log
         s = jarvis.settings
         self.briefing_at = parse_time(s.briefing_time) if s.briefing_time else None
+        self.collect_at = parse_time(s.collect_time) if s.collect_time else None
         self.consolidate_every = timedelta(minutes=s.consolidate_every_min)
         self.consolidate_after = s.consolidate_after_memos
         self.last_consolidation = self.clock()
@@ -82,6 +95,14 @@ class Daemon:
                     self.log(f"vision: {e.label} {e.kind}")
             except Exception as exc:
                 self.log(f"vision failed: {exc}")
+        if (
+            self.collect_job
+            and self.collect_at
+            and not self._collecting.is_set()
+            and briefing_due(now, self.collect_at, self.store.get_state(LAST_COLLECT_KEY))
+        ):
+            self.store.set_state(LAST_COLLECT_KEY, now.date().isoformat())
+            self.collect()
         pending = len(self.store.memos(status="pending", limit=self.consolidate_after))
         if pending and (pending >= self.consolidate_after or now - self.last_consolidation >= self.consolidate_every):
             self.consolidate(now)
@@ -90,12 +111,29 @@ class Daemon:
             and briefing_due(now, self.briefing_at, self.store.get_state(LAST_BRIEFING_KEY))
             and (self._brief_retry_at is None or now >= self._brief_retry_at)
             and self._user_here()
+            and not self._collecting.is_set()  # let today's articles land first
         ):
             try:
                 self.brief(now)
             except Exception as exc:  # e.g. network down: try again later, not every second
                 self._brief_retry_at = now + timedelta(minutes=10)
                 self.log(f"briefing failed, retrying in 10 min: {exc}")
+
+    def collect(self) -> None:
+        if self.collect_job is None or self._collecting.is_set():
+            return
+        self._collecting.set()
+        job = self.collect_job
+
+        def run() -> None:
+            try:
+                self.log(f"collected: {job()}")
+            except Exception as exc:
+                self.log(f"collection failed: {exc}")
+            finally:
+                self._collecting.clear()
+
+        self.run_job(run)
 
     def _user_here(self) -> bool:
         """With a camera, hold the briefing until someone is actually in front of it."""
@@ -114,7 +152,7 @@ class Daemon:
         now = now or self.clock()
         self.consolidate(now)  # fold in last night's memos first
         self.jarvis.reset()  # a new day starts a new conversation; long-term memory stays
-        text = self.jarvis.ask(briefing_prompt(self.store, now)).text
+        text = self.jarvis.ask(briefing_prompt(self.store, now, self.jarvis.knowledge)).text
         self.store.set_state(LAST_BRIEFING_KEY, now.date().isoformat())
         self.speaker.say(text)
         return text

@@ -27,10 +27,21 @@ class Settings:
     camera: str = ""
     detector_weights: str = "yolo11n.pt"  # or your own trained weights, e.g. from the CCTV project
     vision_every_s: float = 2.0
+    # knowledge: daily feed collection
+    collect_time: str = "06:30"  # local HH:MM; empty disables daily collection
+    knowledge_keep_days: int = 90
 
     @property
     def db_path(self) -> Path:
         return self.data_dir / "memory.db"
+
+    @property
+    def knowledge_path(self) -> Path:
+        return self.data_dir / "knowledge.db"
+
+    @property
+    def sources_path(self) -> Path:
+        return self.data_dir / "sources.json"
 
     @property
     def voiceprint_path(self) -> Path:
@@ -55,4 +66,6 @@ class Settings:
             camera=env.get("JARVIS_CAMERA", cls.camera),
             detector_weights=env.get("JARVIS_DETECTOR_WEIGHTS", cls.detector_weights),
             vision_every_s=float(env.get("JARVIS_VISION_EVERY_S", cls.vision_every_s)),
+            collect_time=env.get("JARVIS_COLLECT_TIME", cls.collect_time),
+            knowledge_keep_days=int(env.get("JARVIS_KNOWLEDGE_KEEP_DAYS", cls.knowledge_keep_days)),
         )

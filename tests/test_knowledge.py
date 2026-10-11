@@ -1,0 +1,153 @@
+"""Knowledge base and collector tests with canned feeds (no network)."""
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace as NS
+
+from jarvis.agent import Jarvis
+from jarvis.briefing import briefing_prompt
+from jarvis.config import Settings
+from jarvis.daemon import LAST_COLLECT_KEY, Daemon
+from jarvis.knowledge import Collector, KnowledgeBase, Source, load_sources, parse_feed
+from jarvis.memory import MemoryStore
+
+T0 = datetime(2026, 10, 11, 6, 0, tzinfo=timezone.utc)
+
+RSS = b"""<?xml version="1.0"?>
+<rss version="2.0"><channel><title>GeekNews</title><link>https://news.hada.io</link>
+<item><title>Rust 2026 \xeb\xa1\x9c\xeb\x93\x9c\xeb\xa7\xb5 \xea\xb3\xb5\xea\xb0\x9c</title>
+<link>https://example.com/rust</link>
+<description>&lt;p&gt;Rust \xed\x8c\x80\xec\x9d\xb4 \xeb\xa1\x9c\xeb\x93\x9c\xeb\xa7\xb5\xec\x9d\x84 \xeb\xb0\x9c\xed\x91\x9c&lt;/p&gt;</description>
+<pubDate>Sat, 10 Oct 2026 08:00:00 +0900</pubDate></item>
+<item><title>Blocked article</title><link>https://blocked.example/post</link><description>teaser</description></item>
+</channel></rss>"""
+
+ATOM = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Quanta</title>
+<entry><title>New proof of the Kakeya conjecture</title>
+<link rel="alternate" href="https://example.org/kakeya"/><link rel="self" href="https://example.org/self"/>
+<updated>2026-10-09T12:00:00Z</updated><summary>Mathematicians proved it in three dimensions.</summary></entry>
+</feed>"""
+
+RDF = b"""<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"
+ xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel><title>arXiv cs.RO</title></channel>
+<item><title>Model predictive control for legged robots</title><link>https://arxiv.org/abs/2610.00001</link>
+<description>We present an MPC controller for quadruped locomotion.</description><dc:date>2026-10-10</dc:date></item>
+</rdf:RDF>"""
+
+ARTICLE = b"""<html><head><script>var x=1</script><style>p{}</style></head><body><nav>menu</nav>
+<article><h1>Rust 2026</h1><p>The Rust team published its 2026 roadmap.</p><p>Async traits ship.</p></article>
+<footer>copyright</footer></body></html>"""
+
+PAGES = {
+    "https://feeds/geek": RSS,
+    "https://feeds/quanta": ATOM,
+    "https://feeds/arxiv": RDF,
+    "https://example.com/robots.txt": b"User-agent: *\nAllow: /\n",
+    "https://example.com/rust": ARTICLE,
+    "https://blocked.example/robots.txt": b"User-agent: *\nDisallow: /\n",
+}
+
+
+def fake_fetch(url):
+    if url not in PAGES:
+        raise OSError(f"404 {url}")
+    return PAGES[url]
+
+
+def test_parse_rss_atom_and_rdf():
+    rss = parse_feed(RSS)
+    assert rss[0].link == "https://example.com/rust" and "로드맵을 발표" in rss[0].summary
+    assert rss[0].published.utcoffset() == timedelta(hours=9)
+    atom = parse_feed(ATOM)
+    assert atom[0].link == "https://example.org/kakeya" and atom[0].published.year == 2026
+    rdf = parse_feed(RDF)
+    assert rdf[0].title.startswith("Model predictive control") and "quadruped" in rdf[0].summary
+
+
+def test_collect_obeys_robots_dedupes_and_reports_failures():
+    kb = KnowledgeBase()
+    sources = [
+        Source("GeekNews", "https://feeds/geek", "it", fetch_full_text=True),
+        Source("Quanta", "https://feeds/quanta", "math"),
+        Source("arXiv RO", "https://feeds/arxiv", "mech"),
+        Source("Broken", "https://feeds/missing", "daily"),
+    ]
+    c = Collector(kb, fetch=fake_fetch, min_interval_s=0)
+    report = c.collect(sources)
+    assert report.new == 4 and report.blocked_by_robots == 1 and report.failed_sources == ["Broken"]
+    full = kb.search("roadmap")[0][0]
+    assert "Async traits ship" in full.text and "copyright" not in full.text and "var x" not in full.text
+    blocked = kb.search("Blocked article")[0][0]
+    assert blocked.text == "teaser"  # kept the feed summary, never fetched the page
+    again = Collector(kb, fetch=fake_fetch, min_interval_s=0).collect(sources)
+    assert again.new == 0 and again.seen == 4
+
+
+def test_search_korean_english_short_terms_and_topic_filter():
+    kb = KnowledgeBase()
+    kb.add("u1", "s", "it", "파이썬 비동기 프로그래밍 정리", "asyncio 이벤트 루프와 코루틴")
+    kb.add("u2", "s", "mech", "PID 제어기 튜닝", "지글러-니콜스 방법으로 게인을 정한다")
+    kb.add("u3", "s", "math", "선형대수 고유값", "eigenvalue decomposition")
+    assert kb.search("비동기")[0][0].url == "u1"  # Korean substring inside a word
+    assert kb.search("eigenvalue")[0][0].url == "u3"
+    assert kb.search("PID")[0][0].url == "u2"  # 3 chars: trigram
+    assert kb.search("제어")[0][0].url == "u2"  # 2 chars: LIKE fallback
+    assert kb.search("튜닝", topic="it") == []
+
+
+def test_prune_and_recent():
+    kb = KnowledgeBase()
+    kb.add("old", "s", "it", "old", "x", now=T0 - timedelta(days=100))
+    kb.add("new", "s", "it", "new", "y", now=T0)
+    assert [d.url for d in kb.recent(T0 - timedelta(days=1))] == ["new"]
+    assert kb.prune(90, now=T0) == 1 and kb.count() == 1
+
+
+def test_sources_file_created_and_editable(tmp_path):
+    path = tmp_path / "sources.json"
+    defaults = load_sources(path)
+    assert path.exists() and {s.topic for s in defaults} == {"it", "math", "mech", "daily"}
+    path.write_text('[{"name": "mine", "url": "https://x/feed", "topic": "it"}]', encoding="utf-8")
+    assert load_sources(path)[0].name == "mine"
+
+
+def test_search_tool_and_briefing_include_articles():
+    kb = KnowledgeBase()
+    kb.add("https://a", "GeekNews", "it", "Claude 신기능 발표", "본문", now=T0)
+    jarvis = Jarvis(Settings(), store=MemoryStore(), client=object(), knowledge=kb)
+    out, err = jarvis.registry.execute("search_knowledge", {"query": "신기능"})
+    assert not err and "https://a" in out
+    prompt = briefing_prompt(jarvis.store, T0 + timedelta(hours=1), kb)
+    assert "[it] Claude 신기능 발표 (GeekNews)" in prompt
+
+
+def test_daemon_collects_once_a_day_before_briefing():
+    now = [datetime(2026, 10, 11, 8, 0)]
+    jobs, said = [], []
+
+    class StubJarvis(Jarvis):
+        def ask(self, text):
+            return NS(text="브리핑")
+
+    store = MemoryStore()
+    jarvis = StubJarvis(Settings(collect_time="06:30", briefing_time="07:30"), store=store, client=object())
+    pending = []
+    d = Daemon(
+        jarvis,
+        None,
+        NS(say=said.append),
+        NS(run=lambda now=None: NS(summary=lambda: "ok")),
+        clock=lambda: now[0],
+        log=lambda s: None,
+        collect_job=lambda: jobs.append(1) or "ok",
+        run_job=pending.append,  # hold the job to simulate it still running
+    )
+    d.tick()
+    assert len(pending) == 1 and said == []  # briefing waits while collection runs
+    pending.pop()()  # collection finishes
+    d.tick()
+    d.tick()
+    assert jobs == [1] and said == ["브리핑"]
+    assert store.get_state(LAST_COLLECT_KEY) == "2026-10-11"
