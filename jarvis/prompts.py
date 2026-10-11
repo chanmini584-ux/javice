@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import platform
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .memory import MemoryStore
 
@@ -67,6 +67,15 @@ def situation_block(store: MemoryStore, now: datetime | None = None) -> str:
             lines.append(f"  - #{g.id} {g.title}{due} [{done}/{len(steps)} steps done]")
             if nxt:
                 lines.append(f"      next: step #{nxt.id} ({nxt.status}) {nxt.description}")
+    scene = store.get_state("vision_scene")
+    if scene:
+        seen_at, _, description = scene.partition("|")
+        lines.append(f"camera view (as of {seen_at}): {description}")
+    events = store.events(since=now - timedelta(hours=12), limit=5)
+    if events:
+        lines.append("recent sensor events:")
+        lines += [f"  - {e['at']} {e['source']} {e['kind']}: {e['detail']}" for e in events]
+
     memos = store.memos(limit=5)
     if memos:
         lines.append("recent things the user said aloud (voice memos):")

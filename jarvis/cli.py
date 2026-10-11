@@ -54,6 +54,23 @@ def _make_voiceprint(settings: Settings):
     return VoicePrint(embedder, settings.voiceprint_path, settings.owner_threshold)
 
 
+def _make_eyes(settings: Settings, store):
+    if not settings.camera:
+        return None
+    from .vision.backends import OpenCVCamera, YoloDetector
+    from .vision.eyes import Eyes
+
+    source = int(settings.camera) if settings.camera.isdigit() else settings.camera
+    return Eyes(OpenCVCamera(source), YoloDetector(settings.detector_weights), store)
+
+
+def _make_jarvis(settings: Settings, **kwargs) -> Jarvis:
+    from .memory import MemoryStore
+
+    store = MemoryStore(settings.db_path)
+    return Jarvis(settings, store=store, eyes=_make_eyes(settings, store), **kwargs)
+
+
 def cmd_enroll(settings: Settings) -> int:
     from .voice.backends import Microphone
 
@@ -75,7 +92,7 @@ def cmd_listen(settings: Settings, with_voice: bool) -> int:
     from .consolidate import Consolidator
     from .daemon import Daemon
 
-    jarvis = Jarvis(settings)  # approvals default to "deny" when nobody is at the keyboard
+    jarvis = _make_jarvis(settings)  # approvals default to "deny" when nobody is at the keyboard
     listener = None
     if with_voice:
         from .voice.backends import Microphone, WhisperTranscriber
@@ -107,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         from .consolidate import Consolidator
         from .daemon import Daemon
 
-        jarvis = Jarvis(settings)
+        jarvis = _make_jarvis(settings)
         daemon = Daemon(jarvis, None, _make_speaker(), Consolidator(jarvis.client, jarvis.store, settings))
         if argv[0] == "brief":
             daemon.brief()
@@ -135,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         elif kind == "server_tool":
             print(f"  · {data['name']}({json.dumps(data['input'], ensure_ascii=False)[:120]})", file=sys.stderr)
 
-    jarvis = Jarvis(settings, approve=_approve, on_event=on_event)
+    jarvis = _make_jarvis(settings, approve=_approve, on_event=on_event)
 
     if args.prompt:
         print(jarvis.ask(" ".join(args.prompt)).text)

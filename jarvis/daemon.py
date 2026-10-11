@@ -33,6 +33,8 @@ class Daemon:
         clock: Callable[[], datetime] = lambda: datetime.now().astimezone(),
         log: Callable[[str], None] = print,
     ) -> None:
+        # Optional camera: reuses the agent's eyes so `look` and the watcher share one camera.
+        self.eyes = jarvis.eyes
         self.jarvis = jarvis
         self.store = jarvis.store
         self.listener = listener
@@ -47,6 +49,8 @@ class Daemon:
         self.last_consolidation = self.clock()
         self.others_heard = 0
         self._brief_retry_at: datetime | None = None
+        self.vision_every = timedelta(seconds=s.vision_every_s)
+        self._next_observe = self.clock()
         self._queue: queue.Queue[Utterance] = queue.Queue()
         self._stop = threading.Event()
 
@@ -71,6 +75,13 @@ class Daemon:
 
     def tick(self) -> None:
         now = self.clock()
+        if self.eyes is not None and now >= self._next_observe:
+            self._next_observe = now + self.vision_every
+            try:
+                for e in self.eyes.observe(now):
+                    self.log(f"vision: {e.label} {e.kind}")
+            except Exception as exc:
+                self.log(f"vision failed: {exc}")
         pending = len(self.store.memos(status="pending", limit=self.consolidate_after))
         if pending and (pending >= self.consolidate_after or now - self.last_consolidation >= self.consolidate_every):
             self.consolidate(now)
@@ -78,12 +89,17 @@ class Daemon:
             self.briefing_at
             and briefing_due(now, self.briefing_at, self.store.get_state(LAST_BRIEFING_KEY))
             and (self._brief_retry_at is None or now >= self._brief_retry_at)
+            and self._user_here()
         ):
             try:
                 self.brief(now)
             except Exception as exc:  # e.g. network down: try again later, not every second
                 self._brief_retry_at = now + timedelta(minutes=10)
                 self.log(f"briefing failed, retrying in 10 min: {exc}")
+
+    def _user_here(self) -> bool:
+        """With a camera, hold the briefing until someone is actually in front of it."""
+        return self.eyes is None or "person" in self.eyes.tracker.present()
 
     def consolidate(self, now: datetime | None = None) -> None:
         now = now or self.clock()

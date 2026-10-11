@@ -8,6 +8,7 @@ dependencies = ["anthropic>=1.13", "numpy>=1.26"]
 
 [project.optional-dependencies]
 voice = ["sounddevice>=0.4", "faster-whisper>=1.0", "speechbrain>=1.0", "torch>=2.1", "pyttsx3>=2.90"]
+vision = ["opencv-python>=4.8", "ultralytics>=8.3"]
 dev = ["pytest>=8"]
 
 [project.scripts]

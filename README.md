@@ -64,10 +64,19 @@ Claude API(Opus 5.5) 위에 **장기 기억 · 목표/계획 · 도구 실행 ·
 - 사람이 키보드 앞에 없는 모드라서 승인이 필요한 도구(`run_python`)는 자동으로 거절됩니다.
 - 화자 인증 임계값은 `JARVIS_OWNER_THRESHOLD`(기본 0.5)로 조정합니다. 다른 사람이 내 메모로 들어오면 올리고, 내 말이 빠지면 내립니다.
 
+## 시각 (객체탐지)
+
+카메라와 객체탐지 모델을 자비스의 "눈"으로 연결합니다. `JARVIS_CAMERA=0`(웹캠 번호 또는 RTSP/HTTP 주소)을 설정하면 켜집니다.
+
+- **탐지기 교체 가능**: 기본은 Ultralytics YOLO(`yolo11n.pt`)입니다. CCTV 프로젝트에서 학습한 가중치는 `JARVIS_DETECTOR_WEIGHTS=/path/best.pt`로 바로 쓸 수 있습니다. YOLO가 아닌 모델은 `jarvis/vision/base.py`의 `Detector`(`detect(frame) -> list[Detection]`)만 구현하면 됩니다.
+- **장면 추적**: 프레임마다 흔들리는 탐지 결과를 디바운스해서 "사람 등장/사라짐" 같은 안정된 사건으로 바꿉니다(`SceneTracker`). 사건은 기록되고, 현재 장면과 함께 매 턴 상황 블록에 들어갑니다.
+- **`look` 도구**: 대화 중 자비스가 직접 카메라를 봅니다. 탐지 라벨로 부족하면(글자, 표정, 행동) 프레임 이미지를 Claude가 직접 확인합니다. 이미지는 이때만 외부로 나갑니다.
+- **상시 모드 연동**: `jarvis listen`이 2초마다 장면을 갱신하고, 아침 브리핑은 카메라 앞에 사람이 확인될 때까지 기다렸다가 읽어줍니다.
+
 ## 실행
 
 ```bash
-pip install -e '.[dev]'           # 음성까지 쓰려면 '.[dev,voice]'
+pip install -e '.[dev]'           # 음성·시각까지: '.[dev,voice,vision]'
 export ANTHROPIC_API_KEY=sk-ant-...
 jarvis                            # 대화형
 jarvis "이번 주 목표 정리해줘"        # 원샷
@@ -78,7 +87,7 @@ jarvis consolidate                # 지금 메모 정리
 pytest                            # 테스트 (네트워크·마이크 불필요)
 ```
 
-환경 변수: `JARVIS_MODEL`(기본 `claude-opus-5-5`), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`).
+환경 변수: `JARVIS_MODEL`(기본 `claude-opus-5-5`), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`), `JARVIS_CAMERA`(빈 값이면 끔), `JARVIS_DETECTOR_WEIGHTS`(기본 `yolo11n.pt`), `JARVIS_VISION_EVERY_S`(기본 2).
 
 CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/think`(추론 요약 표시), `/quit`.
 
@@ -87,7 +96,8 @@ CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/t
 | 단계 | 내용 |
 |---|---|
 | **v0.1** | 에이전트 루프, 장기 기억/프로필, 목표·계획 추적, 정확한 계산, 웹 검색, 승인 게이트, CLI |
-| **v0.1.1 (현재)** | 상시 음성 모드: 화자 인증, 음성 메모, 중요도 기반 자동 정리·삭제, 대화 기반 자동 계획, 음성 명령, 아침 브리핑 |
+| **v0.1.1** | 상시 음성 모드: 화자 인증, 음성 메모, 중요도 기반 자동 정리·삭제, 대화 기반 자동 계획, 음성 명령, 아침 브리핑 |
+| **v0.1.2 (현재)** | 시각: 교체 가능한 객체탐지기(YOLO/CCTV 모델), 장면 추적, `look` 도구, 사람 감지 기반 브리핑 |
 | v0.2 연결 | MCP 클라이언트로 캘린더·메일·노션·GitHub 등 외부 서비스 연결 → "지금 상황"을 실제 일정/할 일로 판단 |
 | v0.3 능동성 | 스케줄러(아침 브리핑, 마감 임박 알림, 주간 회고), 대화 종료 시 자동 기억 정리·요약 |
 | v0.4 기억 고도화 | 임베딩 기반 의미 검색, 기억 중요도 감쇠/병합, 대화 compaction으로 긴 세션 유지 |
@@ -106,6 +116,7 @@ jarvis/
   daemon.py     상시 모드 (듣기, 명령, 주기적 정리, 아침 브리핑)
   briefing.py   아침 브리핑 프롬프트와 스케줄
   voice/        VAD, 화자 인증(성문), STT/TTS/마이크 백엔드
+  vision/       카메라, 객체탐지기, 장면 추적, look 도구
   cli.py        터미널 UI와 하위 명령
 tests/          가짜 클라이언트로 루프 전체를 검증하는 단위 테스트
 ```

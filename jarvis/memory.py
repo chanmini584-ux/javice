@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS memos (
     created_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -333,6 +340,25 @@ class MemoryStore:
         with self._db:
             self._db.executemany("DELETE FROM memos WHERE id = ?", [(i,) for i in doomed])
         return doomed
+
+    # --- sensor events (vision, later other devices) ------------------------
+
+    def add_event(self, source: str, kind: str, detail: str, at: datetime | None = None) -> int:
+        ts = (at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(timespec="seconds")
+        with self._db:
+            cur = self._db.execute(
+                "INSERT INTO events(source, kind, detail, at) VALUES (?, ?, ?, ?)", (source, kind, detail, ts)
+            )
+        return int(cur.lastrowid)
+
+    def events(self, since: datetime | None = None, limit: int = 20) -> list[dict]:
+        sql, params = "SELECT * FROM events", []
+        if since:
+            sql += " WHERE at >= ?"
+            params.append(since.astimezone(timezone.utc).isoformat(timespec="seconds"))
+        sql += " ORDER BY at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self._db.execute(sql, params)]
 
     # --- internal key/value state (not shown to the model) ----------------
 

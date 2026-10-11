@@ -23,6 +23,10 @@ class Settings:
     owner_threshold: float = 0.5  # cosine score needed to accept a voice as yours
     whisper_model: str = "small"
     language: str = "ko"
+    # vision: camera index ("0") or stream URL; empty disables the camera
+    camera: str = ""
+    detector_weights: str = "yolo11n.pt"  # or your own trained weights, e.g. from the CCTV project
+    vision_every_s: float = 2.0
 
     @property
     def db_path(self) -> Path:
@@ -48,4 +52,7 @@ class Settings:
             owner_threshold=float(env.get("JARVIS_OWNER_THRESHOLD", cls.owner_threshold)),
             whisper_model=env.get("JARVIS_WHISPER_MODEL", cls.whisper_model),
             language=env.get("JARVIS_LANGUAGE", cls.language),
+            camera=env.get("JARVIS_CAMERA", cls.camera),
+            detector_weights=env.get("JARVIS_DETECTOR_WEIGHTS", cls.detector_weights),
+            vision_every_s=float(env.get("JARVIS_VISION_EVERY_S", cls.vision_every_s)),
         )

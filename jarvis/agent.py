@@ -42,6 +42,7 @@ class Jarvis:
         client: Any | None = None,
         approve: ApproveFn = _deny_all,
         on_event: EventFn = _ignore,
+        eyes: Any | None = None,
     ) -> None:
         self.settings = settings or Settings.from_env()
         self.store = store or MemoryStore(self.settings.db_path)
@@ -50,6 +51,9 @@ class Jarvis:
         self.on_event = on_event
         self.registry = ToolRegistry()
         register_builtin_tools(self.registry, self.store)
+        self.eyes = eyes
+        if eyes is not None:
+            eyes.register_tools(self.registry)
         # Conversation history is append-only: thinking blocks are bound to the exact
         # history that produced them, so earlier turns are never edited.
         self.messages: list[dict[str, Any]] = []
