@@ -176,6 +176,7 @@ def cmd_serve(settings: Settings, argv: list[str]) -> int:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--listen", action="store_true", help="also run the always-on voice mode")
     parser.add_argument("--no-voice", action="store_true", help="with --listen: briefing/collection only")
+    parser.add_argument("--open", action="store_true", help="open the chat in the default browser")
     args = parser.parse_args(argv)
 
     _ensure_api_key(settings)
@@ -194,6 +195,12 @@ def cmd_serve(settings: Settings, argv: list[str]) -> int:
         print(f"  http://{h}:{args.port}/#token={token}")
     if args.host == "0.0.0.0":
         print("휴대폰에서 앱으로 설치하고 마이크를 쓰려면 HTTPS가 필요합니다. README의 'Tailscale' 항목을 참고하세요.")
+    if args.open:
+        import webbrowser
+
+        url = f"http://127.0.0.1:{args.port}/#token={token}"
+        threading.Timer(1.5, webbrowser.open, [url]).start()  # after uvicorn starts listening
+    print("종료하려면 이 창에서 Ctrl+C를 누르세요.")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -260,9 +267,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     show_thinking = {"on": False}
+    streamed = {"any": False}
 
     def on_event(kind: str, data: dict[str, Any]) -> None:
-        if kind == "thinking" and show_thinking["on"]:
+        if kind == "text":  # the answer types out as it is generated
+            if not streamed["any"]:
+                print()
+            streamed["any"] = True
+            print(data["text"], end="", flush=True)
+        elif kind == "thinking" and show_thinking["on"]:
             print(f"  (thinking) {data['text']}", file=sys.stderr)
         elif kind == "tool":
             mark = "!" if data["is_error"] else "·"
@@ -273,7 +286,8 @@ def main(argv: list[str] | None = None) -> int:
     jarvis = _make_jarvis(settings, approve=_approve, on_event=on_event)
 
     if args.prompt:
-        print(jarvis.ask(" ".join(args.prompt)).text)
+        result = jarvis.ask(" ".join(args.prompt))
+        print() if streamed["any"] else print(result.text)
         return 0
 
     print("JARVIS online. /help for commands.")
@@ -314,12 +328,21 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"unknown command {cmd}. /help for commands.")
             continue
+        streamed["any"] = False
         try:
             result = jarvis.ask(line)
         except KeyboardInterrupt:
             print("\n(interrupted)")
             continue
-        print(f"\n{result.text}")
+        except Exception as e:
+            print(f"\n[오류] {type(e).__name__}: {e}")
+            continue
+        if streamed["any"]:
+            print()
+            if result.stop_reason != "end_turn":  # refusal / truncation notes are added after streaming
+                print(result.text.rsplit("\n\n", 1)[-1])
+        else:
+            print(f"\n{result.text}")
 
 
 if __name__ == "__main__":

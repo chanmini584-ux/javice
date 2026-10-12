@@ -16,7 +16,7 @@ for %%e in (%JARVIS_EXTRAS:,= %) do call set "EXTRA_ARGS=%%EXTRA_ARGS%% --extra 
 set "UV=%DIR%\bin\windows\uv.exe"
 if not exist "%UV%" for /f "delims=" %%u in ('where uv 2^>nul') do set "UV=%%u"
 if exist "%UV%" (
-  "%UV%" run --project "%DIR%\app" %EXTRA_ARGS% --python 3.12 jarvis serve %*
+  "%UV%" run --project "%DIR%\app" %EXTRA_ARGS% --python 3.12 jarvis serve --open %*
   goto :end
 )
 
@@ -26,7 +26,7 @@ if not exist "%UV_PROJECT_ENVIRONMENT%\Scripts\jarvis.exe" (
   %PY% -m venv "%UV_PROJECT_ENVIRONMENT%"
   "%UV_PROJECT_ENVIRONMENT%\Scripts\pip" install -q "%DIR%\app[%JARVIS_EXTRAS%]"
 )
-"%UV_PROJECT_ENVIRONMENT%\Scripts\jarvis.exe" serve %*
+"%UV_PROJECT_ENVIRONMENT%\Scripts\jarvis.exe" serve --open %*
 :end
 pause
 endlocal

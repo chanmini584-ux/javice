@@ -68,6 +68,21 @@ CREATE TABLE IF NOT EXISTS events (
     detail TEXT NOT NULL,
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    tools TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -363,6 +378,44 @@ class MemoryStore:
         sql += " ORDER BY at DESC, id DESC LIMIT ?"
         params.append(limit)
         return [dict(r) for r in self._db.execute(sql, params)]
+
+    # --- chat transcripts (what the chat app shows; not long-term memory) ------
+
+    def new_chat(self, title: str) -> int:
+        now = _now()
+        title = " ".join(title.split())
+        title = title if len(title) <= 40 else title[:39] + "…"
+        with self._db:
+            cur = self._db.execute(
+                "INSERT INTO chats(title, created_at, updated_at) VALUES (?, ?, ?)", (title or "새 대화", now, now)
+            )
+        return int(cur.lastrowid)
+
+    def chats(self, limit: int = 50) -> list[dict]:
+        rows = self._db.execute("SELECT * FROM chats ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows]
+
+    def chat_exists(self, chat_id: int) -> bool:
+        return self._db.execute("SELECT 1 FROM chats WHERE id = ?", (chat_id,)).fetchone() is not None
+
+    def add_chat_turn(self, chat_id: int, user: str, assistant: str, tools: list[str] = ()) -> None:
+        now = _now()
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO chat_messages(chat_id, role, text, tools, created_at) VALUES (?, ?, ?, ?, ?)",
+                [(chat_id, "user", user, "", now), (chat_id, "assistant", assistant, ",".join(tools), now)],
+            )
+            self._db.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
+
+    def chat_messages(self, chat_id: int) -> list[dict]:
+        rows = self._db.execute(
+            "SELECT role, text, tools, created_at FROM chat_messages WHERE chat_id = ? ORDER BY id", (chat_id,)
+        )
+        return [{**dict(r), "tools": [t for t in r["tools"].split(",") if t]} for r in rows]
+
+    def delete_chat(self, chat_id: int) -> bool:
+        with self._db:
+            return self._db.execute("DELETE FROM chats WHERE id = ?", (chat_id,)).rowcount > 0
 
     # --- internal key/value state (not shown to the model) ----------------
 

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import secrets
 from contextlib import asynccontextmanager
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -22,13 +24,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..agent import Jarvis
 
 STATIC = resources.files("jarvis.web") / "static"
-MAX_SESSIONS = 20
+MAX_LIVE_CHATS = 20
 
 
 def load_or_create_token(path: Path) -> str:
@@ -46,25 +48,29 @@ def load_or_create_token(path: Path) -> str:
 
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
-    session: str = Field(default="default", max_length=64)
-
-
-class SessionIn(BaseModel):
-    session: str = Field(default="default", max_length=64)
+    chat_id: int | None = None  # None starts a new conversation
 
 
 class MemoIn(BaseModel):
     text: str = Field(min_length=1, max_length=5_000)
 
 
+Emit = Callable[[str, dict[str, Any]], None]
+
+
 class Worker:
-    """Owns the Jarvis instance on a single thread; one conversation per client session."""
+    """Owns the Jarvis instance on a single thread.
+
+    Every conversation is saved as a transcript, so the chat list survives reloads
+    and restarts. The live model history (with thinking blocks) is kept for the
+    most recent conversations; an older one is resumed from its transcript.
+    """
 
     def __init__(self, build: Callable[[], Jarvis]) -> None:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-web")
         self._jarvis: Jarvis | None = None
         self._build = build
-        self._sessions: dict[str, list[dict[str, Any]]] = {}
+        self._live: OrderedDict[int, list[dict[str, Any]]] = OrderedDict()
 
     @property
     def jarvis(self) -> Jarvis:
@@ -75,16 +81,52 @@ class Worker:
     async def run(self, fn: Callable[[], Any]) -> Any:
         return await asyncio.get_running_loop().run_in_executor(self._pool, fn)
 
-    def chat(self, session: str, message: str) -> dict[str, Any]:
-        j = self.jarvis
-        if session not in self._sessions and len(self._sessions) >= MAX_SESSIONS:
-            self._sessions.pop(next(iter(self._sessions)))  # drop the oldest conversation
-        j.messages = self._sessions.setdefault(session, [])
-        result = j.ask(message)
-        return {"text": result.text, "stop_reason": result.stop_reason, "tools": result.tool_calls}
+    def _history(self, chat_id: int) -> list[dict[str, Any]]:
+        if chat_id not in self._live:
+            if len(self._live) >= MAX_LIVE_CHATS:
+                self._live.popitem(last=False)
+            self._live[chat_id] = [
+                {"role": m["role"], "content": m["text"]} for m in self.jarvis.store.chat_messages(chat_id)
+            ]
+        self._live.move_to_end(chat_id)
+        return self._live[chat_id]
 
-    def reset(self, session: str) -> None:
-        self._sessions.pop(session, None)
+    def chat(self, chat_id: int | None, message: str, emit: Emit | None = None) -> dict[str, Any]:
+        j, store = self.jarvis, self.jarvis.store
+        if chat_id is None or not store.chat_exists(chat_id):
+            chat_id = store.new_chat(message)
+        if emit:
+            emit("chat", {"chat_id": chat_id})
+        j.messages = self._history(chat_id)
+        previous = j.on_event
+
+        def forward(kind: str, data: dict[str, Any]) -> None:
+            previous(kind, data)
+            if emit is None:
+                return
+            if kind == "text":
+                emit("text", {"text": data["text"]})
+            elif kind in ("tool", "server_tool"):
+                emit("tool", {"name": data["name"]})  # names only: outputs can be large or private
+
+        j.on_event = forward
+        try:
+            result = j.ask(message)
+        finally:
+            j.on_event = previous
+        store.add_chat_turn(chat_id, message, result.text, result.tool_calls)
+        return {"chat_id": chat_id, "text": result.text, "stop_reason": result.stop_reason, "tools": result.tool_calls}
+
+    def chats(self) -> list[dict[str, Any]]:
+        return self.jarvis.store.chats()
+
+    def messages(self, chat_id: int) -> list[dict[str, Any]] | None:
+        store = self.jarvis.store
+        return store.chat_messages(chat_id) if store.chat_exists(chat_id) else None
+
+    def delete(self, chat_id: int) -> bool:
+        self._live.pop(chat_id, None)
+        return self.jarvis.store.delete_chat(chat_id)
 
     def overview(self) -> dict[str, Any]:
         store = self.jarvis.store
@@ -97,6 +139,10 @@ class Worker:
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=False)
+
+
+def _sse(kind: str, data: dict[str, Any]) -> str:
+    return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 def create_app(build: Callable[[], Jarvis], token: str) -> FastAPI:
@@ -121,12 +167,50 @@ def create_app(build: Callable[[], Jarvis], token: str) -> FastAPI:
 
     @app.post("/api/chat", dependencies=[Depends(auth)])
     async def chat(body: ChatIn) -> dict[str, Any]:
-        return await worker.run(lambda: worker.chat(body.session, body.message))
+        return await worker.run(lambda: worker.chat(body.chat_id, body.message))
 
-    @app.post("/api/reset", dependencies=[Depends(auth)])
-    async def reset(body: SessionIn) -> dict[str, bool]:
-        await worker.run(lambda: worker.reset(body.session))
-        return {"ok": True}
+    @app.post("/api/chat/stream", dependencies=[Depends(auth)])
+    async def chat_stream(body: ChatIn) -> StreamingResponse:
+        """Server-sent events: chat, text (deltas), tool, then done or error."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+
+        def emit(kind: str, data: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, (kind, data))
+
+        def job() -> None:
+            try:
+                emit("done", worker.chat(body.chat_id, body.message, emit))
+            except Exception as e:  # surfaced to the chat window instead of a dropped connection
+                emit("error", {"message": f"{type(e).__name__}: {e}"})
+
+        task = asyncio.ensure_future(worker.run(job))  # start now; the generator only drains the queue
+
+        async def events():
+            while True:
+                kind, data = await queue.get()
+                yield _sse(kind, data)
+                if kind in ("done", "error"):
+                    break
+            await task
+
+        headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
+
+    @app.get("/api/chats", dependencies=[Depends(auth)])
+    async def chats() -> list[dict[str, Any]]:
+        return await worker.run(worker.chats)
+
+    @app.get("/api/chats/{chat_id}", dependencies=[Depends(auth)])
+    async def chat_messages(chat_id: int) -> list[dict[str, Any]]:
+        found = await worker.run(lambda: worker.messages(chat_id))
+        if found is None:
+            raise HTTPException(status_code=404, detail="no such chat")
+        return found
+
+    @app.delete("/api/chats/{chat_id}", dependencies=[Depends(auth)])
+    async def delete_chat(chat_id: int) -> dict[str, bool]:
+        return {"ok": await worker.run(lambda: worker.delete(chat_id))}
 
     @app.post("/api/memo", dependencies=[Depends(auth)])
     async def memo(body: MemoIn) -> dict[str, Any]:

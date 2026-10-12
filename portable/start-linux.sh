@@ -14,11 +14,11 @@ UV="$DIR/bin/linux/uv"
 [ -x "$UV" ] || UV="$(command -v uv || true)"
 if [ -n "$UV" ]; then
   args=(); IFS=',' read -ra ex <<< "$EXTRAS"; for e in "${ex[@]}"; do args+=(--extra "$e"); done
-  exec "$UV" run --project "$DIR/app" "${args[@]}" --python 3.12 jarvis serve "$@"
+  exec "$UV" run --project "$DIR/app" "${args[@]}" --python 3.12 jarvis serve --open "$@"
 fi
 
 PY="$(command -v python3 || true)"
 [ -n "$PY" ] || { echo "Python 3.10+ 또는 uv가 필요합니다. bin/linux/uv를 넣거나 Python을 설치하세요."; exit 1; }
 VENV="$UV_PROJECT_ENVIRONMENT"
 [ -x "$VENV/bin/jarvis" ] || { "$PY" -m venv "$VENV" && "$VENV/bin/pip" install -q "$DIR/app[$EXTRAS]"; }
-exec "$VENV/bin/jarvis" serve "$@"
+exec "$VENV/bin/jarvis" serve --open "$@"

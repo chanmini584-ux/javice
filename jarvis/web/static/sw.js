@@ -1,5 +1,5 @@
 // App-shell cache so the installed app opens instantly; API calls always go to the network.
-const CACHE = "jarvis-shell-v1";
+const CACHE = "jarvis-shell-v2";
 const SHELL = ["/", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (e) => {

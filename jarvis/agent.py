@@ -88,6 +88,9 @@ class Jarvis:
             cache_control={"type": "ephemeral"},
         )
         with self.client.beta.messages.stream(**params) as stream:
+            # Forward text as it is generated so chat UIs can show the answer typing out.
+            for chunk in getattr(stream, "text_stream", ()):
+                self.on_event("text", {"text": chunk})
             return stream.get_final_message()
 
     # -- loop ------------------------------------------------------------------

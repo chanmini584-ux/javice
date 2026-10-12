@@ -1,5 +1,6 @@
 """Web API tests with FastAPI's TestClient and a stub agent (no network)."""
 
+import json
 import threading
 from types import SimpleNamespace as NS
 
@@ -18,7 +19,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 class EchoJarvis(Jarvis):
-    """Records which conversation and thread each turn ran on."""
+    """Streams a canned answer; numbers it by how many user turns the history holds."""
 
     def __init__(self):
         super().__init__(Settings(), store=MemoryStore(), client=object())
@@ -26,8 +27,16 @@ class EchoJarvis(Jarvis):
 
     def ask(self, text):
         self.threads.add(threading.get_ident())
+        if text == "boom":
+            raise RuntimeError("API down")
         self.messages.append({"role": "user", "content": text})
-        return NS(text=f"{len(self.messages)}:{text}", stop_reason="end_turn", tool_calls=[])
+        n = sum(m["role"] == "user" for m in self.messages)
+        answer = f"{n}:{text}"
+        self.on_event("tool", {"name": "calculate", "input": {}, "output": "private", "is_error": False})
+        for part in (answer[:2], answer[2:]):
+            self.on_event("text", {"text": part})
+        self.messages.append({"role": "assistant", "content": answer})
+        return NS(text=answer, stop_reason="end_turn", tool_calls=["calculate"])
 
 
 @pytest.fixture
@@ -44,23 +53,77 @@ def client():
         yield c
 
 
+def post(client, path, body):
+    return client.post(path, json=body, headers=AUTH).json()
+
+
+def sse(client, body):
+    with client.stream("POST", "/api/chat/stream", json=body, headers=AUTH) as r:
+        assert r.headers["content-type"].startswith("text/event-stream")
+        raw = "".join(r.iter_text())
+    events = []
+    for frame in raw.strip().split("\n\n"):
+        kind = frame.split("\n")[0].removeprefix("event: ")
+        events.append((kind, json.loads(frame.split("\n")[1].removeprefix("data: "))))
+    return events
+
+
 def test_auth_required(client):
     assert client.get("/api/health").json() == {"status": "ok"}
     assert client.post("/api/chat", json={"message": "hi"}).status_code == 401
     assert client.post("/api/chat", json={"message": "hi"}, headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert client.post("/api/chat/stream", json={"message": "hi"}).status_code == 401
+    assert client.get("/api/chats").status_code == 401
     assert client.get("/api/overview", headers={"Authorization": TOKEN}).status_code == 401
 
 
-def test_chat_keeps_separate_conversations_on_one_thread(client):
-    r1 = client.post("/api/chat", json={"message": "a", "session": "phone"}, headers=AUTH).json()
-    r2 = client.post("/api/chat", json={"message": "b", "session": "phone"}, headers=AUTH).json()
-    r3 = client.post("/api/chat", json={"message": "c", "session": "laptop"}, headers=AUTH).json()
-    assert (r1["text"], r2["text"], r3["text"]) == ("1:a", "2:b", "1:c")
-    client.post("/api/reset", json={"session": "phone"}, headers=AUTH)
-    assert client.post("/api/chat", json={"message": "d", "session": "phone"}, headers=AUTH).json()["text"] == "1:d"
+def test_conversations_are_saved_and_resumed(client):
+    a = post(client, "/api/chat", {"message": "오늘 일정 정리해줘"})
+    a2 = post(client, "/api/chat", {"message": "b", "chat_id": a["chat_id"]})
+    other = post(client, "/api/chat", {"message": "c"})
+    assert (a["text"], a2["text"], other["text"]) == ("1:오늘 일정 정리해줘", "2:b", "1:c")
+    assert other["chat_id"] != a["chat_id"]
+
+    listed = client.get("/api/chats", headers=AUTH).json()
+    assert [c["title"] for c in listed] == ["c", "오늘 일정 정리해줘"]  # most recent first
+    msgs = client.get(f"/api/chats/{a['chat_id']}", headers=AUTH).json()
+    assert [(m["role"], m["text"]) for m in msgs] == [
+        ("user", "오늘 일정 정리해줘"), ("assistant", "1:오늘 일정 정리해줘"), ("user", "b"), ("assistant", "2:b")]
+    assert msgs[1]["tools"] == ["calculate"]
+
+    client.app.state.worker._live.clear()  # as after a restart: history comes back from the transcript
+    assert post(client, "/api/chat", {"message": "d", "chat_id": a["chat_id"]})["text"] == "3:d"
+
     jarvis = client.built[0]
     assert len(client.built) == 1 and len(jarvis.threads) == 1
     assert threading.get_ident() not in jarvis.threads  # all agent work off the event loop
+
+
+def test_stream_sends_deltas_tools_and_done(client):
+    events = sse(client, {"message": "hello"})
+    kinds = [k for k, _ in events]
+    assert kinds == ["chat", "tool", "text", "text", "done"]
+    chat_id = events[0][1]["chat_id"]
+    assert events[1][1] == {"name": "calculate"}  # tool output is never sent to the browser
+    assert "".join(d["text"] for k, d in events if k == "text") == "1:hello"
+    assert events[-1][1]["text"] == "1:hello" and events[-1][1]["chat_id"] == chat_id
+    assert sse(client, {"message": "again", "chat_id": chat_id})[-1][1]["text"] == "2:again"
+
+
+def test_stream_reports_errors_and_keeps_transcript_clean(client):
+    events = sse(client, {"message": "boom"})
+    assert events[-1] == ("error", {"message": "RuntimeError: API down"})
+    chat_id = events[0][1]["chat_id"]
+    assert client.get(f"/api/chats/{chat_id}", headers=AUTH).json() == []
+
+
+def test_delete_chat(client):
+    chat_id = post(client, "/api/chat", {"message": "x"})["chat_id"]
+    assert client.delete(f"/api/chats/{chat_id}", headers=AUTH).json() == {"ok": True}
+    assert client.get(f"/api/chats/{chat_id}", headers=AUTH).status_code == 404
+    assert client.get("/api/chats", headers=AUTH).json() == []
+    # a deleted or unknown id just starts a new conversation
+    assert post(client, "/api/chat", {"message": "y", "chat_id": chat_id})["chat_id"] != chat_id
 
 
 def test_memo_and_overview(client):
@@ -86,6 +149,7 @@ def test_validation(client):
 def test_web_app_assets_served(client):
     html = client.get("/")
     assert html.status_code == 200 and "JARVIS" in html.text and "manifest.webmanifest" in html.text
+    assert "/api/chat/stream" in html.text and "/api/chats" in html.text
     assert client.get("/manifest.webmanifest").json()["display"] == "standalone"
     assert "serviceWorker" in html.text and client.get("/sw.js").status_code == 200
     assert client.get("/icon.svg").headers["content-type"].startswith("image/svg")

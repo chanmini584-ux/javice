@@ -140,3 +140,14 @@ def test_failed_turn_is_rolled_back():
     with pytest.raises(RuntimeError):
         agent.ask("x")
     assert agent.messages == []
+
+
+def test_text_is_streamed_to_on_event():
+    class StreamingFake(FakeStream):
+        text_stream = ("안녕", "하세요")
+
+    seen = []
+    client = NS(beta=NS(messages=NS(stream=lambda **p: StreamingFake(msg([text("안녕하세요")], "end_turn")))))
+    agent = Jarvis(Settings(), store=MemoryStore(), client=client, on_event=lambda k, d: seen.append((k, d)))
+    assert agent.ask("hi").text == "안녕하세요"
+    assert [d["text"] for k, d in seen if k == "text"] == ["안녕", "하세요"]
