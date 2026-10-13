@@ -30,6 +30,8 @@ class Settings:
     # knowledge: daily feed collection
     collect_time: str = "06:30"  # local HH:MM; empty disables daily collection
     knowledge_keep_days: int = 90
+    # proactive thinking: local HH:MM times, comma-separated; empty disables it
+    reflect_times: str = "12:30,18:00,21:30"
 
     @property
     def db_path(self) -> Path:
@@ -68,4 +70,5 @@ class Settings:
             vision_every_s=float(env.get("JARVIS_VISION_EVERY_S", cls.vision_every_s)),
             collect_time=env.get("JARVIS_COLLECT_TIME", cls.collect_time),
             knowledge_keep_days=int(env.get("JARVIS_KNOWLEDGE_KEEP_DAYS", cls.knowledge_keep_days)),
+            reflect_times=env.get("JARVIS_REFLECT_TIMES", cls.reflect_times),
         )

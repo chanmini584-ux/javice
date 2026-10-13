@@ -181,3 +181,34 @@ def test_schedule_endpoints_and_reminders(client):
     assert client.patch("/api/schedule/999", json={"title": "x"}, headers=AUTH).status_code == 404
     assert client.patch(f"/api/schedule/{b['id']}", json={"status": "bogus"}, headers=AUTH).status_code == 422
     assert client.get("/api/schedule").status_code == 401
+
+
+def test_notices_and_reflect_now(client):
+    worker = client.app.state.worker
+
+    def seed():
+        from datetime import datetime, timezone
+
+        store, at = worker.jarvis.store, datetime(2026, 10, 13, 9, tzinfo=timezone.utc)
+        store.add_notice("knowledge", 1, "읽을거리", "논문 하나.", now=at)
+        store.add_notice("deadline", 3, "과제 마감", "오늘 시작하세요.", now=at)
+
+    worker._pool.submit(seed).result()
+    unread = client.get("/api/notices?unread=true", headers=AUTH).json()
+    assert [n["title"] for n in unread] == ["과제 마감", "읽을거리"]  # same moment: most important first
+    assert post(client, "/api/notices/read", {"ids": [unread[0]["id"]]}) == {"marked": 1}
+    assert len(client.get("/api/notices?unread=true", headers=AUTH).json()) == 1
+    assert post(client, "/api/notices/read", {}) == {"marked": 1}
+    assert len(client.get("/api/notices", headers=AUTH).json()) == 2
+
+    reflected = []
+    worker._reflector = NS(run=lambda: reflected.append(1) or [{"id": 9, "title": "t"}])
+    assert post(client, "/api/reflect", {}) == [{"id": 9, "title": "t"}] and reflected == [1]
+
+    def fail():
+        raise OSError("network down")
+
+    worker._reflector = NS(run=fail)
+    r = client.post("/api/reflect", headers=AUTH)
+    assert r.status_code == 502 and "network down" in r.json()["detail"]
+    assert client.get("/api/notices").status_code == 401

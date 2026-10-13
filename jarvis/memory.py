@@ -100,6 +100,15 @@ CREATE TABLE IF NOT EXISTS schedule (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedule_start ON schedule(status, start);
+CREATE TABLE IF NOT EXISTS notices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    priority INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    read_at TEXT
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -519,6 +528,33 @@ class MemoryStore:
             self._db.execute(
                 "UPDATE schedule SET reminded_at = ? WHERE id = ?", ((now or datetime.now()).isoformat(), item_id)
             )
+
+    # --- notices: things JARVIS decided on its own to tell the user ----------
+
+    def add_notice(self, kind: str, priority: int, title: str, message: str, now: datetime | None = None) -> int:
+        ts = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(timespec="seconds")
+        with self._db:
+            cur = self._db.execute(
+                "INSERT INTO notices(kind, priority, title, message, created_at) VALUES (?, ?, ?, ?, ?)",
+                (kind, max(1, min(3, int(priority))), title.strip(), message.strip(), ts),
+            )
+        return int(cur.lastrowid)
+
+    def notices(self, unread_only: bool = False, limit: int = 30) -> list[dict]:
+        sql = "SELECT * FROM notices" + (" WHERE read_at IS NULL" if unread_only else "")
+        # newest batch first; inside a batch, the most important first
+        order = " ORDER BY created_at DESC, priority DESC, id"
+        return [dict(r) for r in self._db.execute(sql + order + " LIMIT ?", (limit,))]
+
+    def mark_notices_read(self, ids: list[int] | None = None) -> int:
+        now = _now()
+        with self._db:
+            if ids is None:
+                return self._db.execute("UPDATE notices SET read_at = ? WHERE read_at IS NULL", (now,)).rowcount
+            marks = ",".join("?" * len(ids)) or "NULL"
+            return self._db.execute(
+                f"UPDATE notices SET read_at = ? WHERE read_at IS NULL AND id IN ({marks})", (now, *ids)
+            ).rowcount
 
     # --- chat transcripts (what the chat app shows; not long-term memory) ------
 

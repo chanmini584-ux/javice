@@ -122,12 +122,15 @@ def _make_daemon(settings: Settings, with_voice: bool):
         if not vp.enrolled:
             raise SystemExit("등록된 목소리가 없습니다. 먼저 `jarvis enroll`을 실행하세요.")
         listener = VoiceListener(Microphone(), vp, WhisperTranscriber(settings.whisper_model, settings.language))
+    from .reflect import Reflector
+
     return Daemon(
         jarvis,
         listener,
         _make_speaker(),
         Consolidator(jarvis.client, jarvis.store, settings),
         collect_job=_collect_job(settings),
+        reflector=Reflector(jarvis.client, jarvis.store, settings, jarvis.knowledge),
     )
 
 
@@ -181,7 +184,8 @@ def cmd_serve(settings: Settings, argv: list[str]) -> int:
 
     _ensure_api_key(settings)
     token = load_or_create_token(settings.data_dir / "web_token")
-    app = create_app(lambda: _make_jarvis(settings), token)
+    # With --listen the daemon runs the scheduled reflections; otherwise the web server does.
+    app = create_app(lambda: _make_jarvis(settings), token, proactive=not args.listen)
 
     if args.listen:
         def run_daemon() -> None:
@@ -240,6 +244,15 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_enroll(settings)
     if argv and argv[0] == "listen":
         return cmd_listen(settings, with_voice="--no-voice" not in argv)
+    if argv and argv[0] == "reflect":
+        from .reflect import Reflector
+
+        jarvis = _make_jarvis(settings)
+        notices = Reflector(jarvis.client, jarvis.store, settings, jarvis.knowledge).run()
+        for n in notices:
+            print(f"[{n['priority']}] {n['title']}: {n['message']}")
+        print(f"{len(notices)} notice(s)" if notices else "지금은 따로 알릴 것이 없습니다.")
+        return 0
     if argv and argv[0] == "collect":
         print(_collect_job(settings)())
         return 0
@@ -261,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         epilog="subcommands: enroll (register your voice), listen [--no-voice] (always-on mode), "
         "brief (morning briefing now), consolidate (judge pending voice memos now), "
         "collect (fetch today's articles now; sources in ~/.jarvis/sources.json), "
+        "reflect (let JARVIS review your situation now and report what matters), "
         "serve [--host 0.0.0.0] [--listen] (web app for any browser or phone)",
     )
     parser.add_argument("prompt", nargs="*", help="one-shot prompt; omit for interactive mode")

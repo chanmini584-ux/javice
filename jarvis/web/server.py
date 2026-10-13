@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from collections import OrderedDict
@@ -30,6 +31,7 @@ from pydantic import BaseModel, Field
 from ..agent import Jarvis
 from ..memory import ScheduleItem
 
+log = logging.getLogger("jarvis.web")
 STATIC = resources.files("jarvis.web") / "static"
 MAX_LIVE_CHATS = 20
 
@@ -54,6 +56,10 @@ class ChatIn(BaseModel):
 
 class MemoIn(BaseModel):
     text: str = Field(min_length=1, max_length=5_000)
+
+
+class ReadIn(BaseModel):
+    ids: list[int] | None = None  # None marks every notice read
 
 
 class ScheduleIn(BaseModel):
@@ -91,6 +97,7 @@ class Worker:
         self._jarvis: Jarvis | None = None
         self._build = build
         self._live: OrderedDict[int, list[dict[str, Any]]] = OrderedDict()
+        self._reflector = None
 
     @property
     def jarvis(self) -> Jarvis:
@@ -156,6 +163,19 @@ class Worker:
         # Shown by every open browser; each one remembers what it already showed.
         return [_item(i) for i in self.jarvis.store.reminders_due(datetime.now(), include_reminded=True)]
 
+    @property
+    def reflector(self):
+        if self._reflector is None:
+            from ..reflect import Reflector
+
+            j = self.jarvis
+            self._reflector = Reflector(j.client, j.store, j.settings, j.knowledge)
+        return self._reflector
+
+    def reflect_if_due(self) -> list[dict[str, Any]]:
+        now = datetime.now().astimezone()
+        return self.reflector.run(now) if self.reflector.claim(now) else []
+
     def overview(self) -> dict[str, Any]:
         store = self.jarvis.store
         return {
@@ -177,12 +197,24 @@ def _sse(kind: str, data: dict[str, Any]) -> str:
     return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def create_app(build: Callable[[], Jarvis], token: str) -> FastAPI:
+def create_app(build: Callable[[], Jarvis], token: str, proactive: bool = False) -> FastAPI:
+    """proactive: run scheduled reflections here (off when the always-on daemon does it)."""
     worker = Worker(build)
+
+    async def reflection_loop() -> None:
+        while True:
+            try:
+                await worker.run(worker.reflect_if_due)
+            except Exception as e:  # e.g. network down; the next slot tries again
+                log.warning("reflection failed: %s", e)
+            await asyncio.sleep(60)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        task = asyncio.create_task(reflection_loop()) if proactive else None
         yield
+        if task:
+            task.cancel()
         worker.shutdown()
 
     app = FastAPI(title="JARVIS", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -285,6 +317,22 @@ def create_app(build: Callable[[], Jarvis], token: str) -> FastAPI:
     @app.get("/api/reminders", dependencies=[Depends(auth)])
     async def reminders() -> list[dict[str, Any]]:
         return await worker.run(worker.reminders)
+
+    @app.get("/api/notices", dependencies=[Depends(auth)])
+    async def notices(unread: bool = False) -> list[dict[str, Any]]:
+        return await worker.run(lambda: worker.jarvis.store.notices(unread_only=unread))
+
+    @app.post("/api/notices/read", dependencies=[Depends(auth)])
+    async def read_notices(body: ReadIn) -> dict[str, int]:
+        return {"marked": await worker.run(lambda: worker.jarvis.store.mark_notices_read(body.ids))}
+
+    @app.post("/api/reflect", dependencies=[Depends(auth)])
+    async def reflect_now() -> list[dict[str, Any]]:
+        """Ask JARVIS to look over everything right now."""
+        try:
+            return await worker.run(lambda: worker.reflector.run())
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}") from e
 
     @app.get("/api/overview", dependencies=[Depends(auth)])
     async def overview() -> dict[str, Any]:

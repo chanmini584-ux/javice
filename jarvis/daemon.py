@@ -40,7 +40,10 @@ class Daemon:
         log: Callable[[str], None] = print,
         collect_job: Callable[[], str] | None = None,
         run_job: Callable[[Callable[[], None]], None] = _in_background,
+        reflector=None,
     ) -> None:
+        # Optional proactive thinking (see reflect.py): runs at its scheduled times.
+        self.reflector = reflector
         # Daily knowledge collection runs off the main thread (it can take minutes) and
         # must open its own database connection; it returns a one-line report.
         self.collect_job = collect_job
@@ -108,6 +111,8 @@ class Daemon:
         pending = len(self.store.memos(status="pending", limit=self.consolidate_after))
         if pending and (pending >= self.consolidate_after or now - self.last_consolidation >= self.consolidate_every):
             self.consolidate(now)
+        if self.reflector is not None and not self._collecting.is_set() and self.reflector.claim(now):
+            self.reflect(now)
         if (
             self.briefing_at
             and briefing_due(now, self.briefing_at, self.store.get_state(LAST_BRIEFING_KEY))
@@ -134,6 +139,23 @@ class Daemon:
                 self.speaker.say(f"{when} {item.title} 일정이 있습니다{place}.")
             except Exception as exc:
                 self.log(f"reminder speech failed: {exc}")
+
+    def reflect(self, now: datetime | None = None) -> list[dict]:
+        """Think about the situation unprompted; say what is worth saying."""
+        now = now or self.clock()
+        try:
+            notices = self.reflector.run(now)
+        except Exception as exc:  # e.g. network down: skip this slot, the next one will run
+            self.log(f"reflection failed: {exc}")
+            return []
+        self.log(f"reflection: {len(notices)} notice(s)")
+        for n in notices:
+            if n["priority"] >= 2:
+                try:
+                    self.speaker.say(f"{n['title']}. {n['message']}")
+                except Exception as exc:
+                    self.log(f"notice speech failed: {exc}")
+        return notices
 
     def collect(self) -> None:
         if self.collect_job is None or self._collecting.is_set():
