@@ -171,6 +171,10 @@ def register_builtin_tools(registry: ToolRegistry, store: MemoryStore) -> None:
         ok = store.set_step_status(id, status) if target == "step" else store.set_goal_status(id, status)
         return "updated" if ok else f"no {target} #{id}"
 
+    from .schedule import register_schedule_tools
+
+    register_schedule_tools(registry, store)
+
     # --- computation ---------------------------------------------------------
 
     @registry.tool(

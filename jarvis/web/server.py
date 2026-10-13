@@ -28,6 +28,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..agent import Jarvis
+from ..memory import ScheduleItem
 
 STATIC = resources.files("jarvis.web") / "static"
 MAX_LIVE_CHATS = 20
@@ -53,6 +54,25 @@ class ChatIn(BaseModel):
 
 class MemoIn(BaseModel):
     text: str = Field(min_length=1, max_length=5_000)
+
+
+class ScheduleIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    start: str = Field(description="'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD' (all day), local time")
+    end: str | None = None
+    location: str = Field(default="", max_length=200)
+    notes: str = Field(default="", max_length=2_000)
+    remind_min: int = Field(default=10, ge=0, le=7 * 24 * 60)
+
+
+class ScheduleUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    start: str | None = None
+    end: str | None = None
+    location: str | None = Field(default=None, max_length=200)
+    notes: str | None = Field(default=None, max_length=2_000)
+    remind_min: int | None = Field(default=None, ge=0, le=7 * 24 * 60)
+    status: str | None = None
 
 
 Emit = Callable[[str, dict[str, Any]], None]
@@ -128,6 +148,14 @@ class Worker:
         self._live.pop(chat_id, None)
         return self.jarvis.store.delete_chat(chat_id)
 
+    def schedule(self, days: int) -> list[dict[str, Any]]:
+        now = datetime.now()
+        return [_item(i) for i in self.jarvis.store.schedule(now, days=days)]
+
+    def reminders(self) -> list[dict[str, Any]]:
+        # Shown by every open browser; each one remembers what it already showed.
+        return [_item(i) for i in self.jarvis.store.reminders_due(datetime.now(), include_reminded=True)]
+
     def overview(self) -> dict[str, Any]:
         store = self.jarvis.store
         return {
@@ -139,6 +167,10 @@ class Worker:
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=False)
+
+
+def _item(item: ScheduleItem) -> dict[str, Any]:
+    return {**asdict(item), "all_day": item.all_day}
 
 
 def _sse(kind: str, data: dict[str, Any]) -> str:
@@ -217,6 +249,42 @@ def create_app(build: Callable[[], Jarvis], token: str) -> FastAPI:
         # Typed or dictated on the user's own device, so it is trusted as the owner's words.
         memo_id, is_new = await worker.run(lambda: worker.jarvis.store.add_memo(body.text, source="app"))
         return {"id": memo_id, "new": is_new}
+
+    @app.get("/api/schedule", dependencies=[Depends(auth)])
+    async def schedule(days: int = 60) -> list[dict[str, Any]]:
+        return await worker.run(lambda: worker.schedule(max(1, min(days, 366))))
+
+    @app.post("/api/schedule", dependencies=[Depends(auth)])
+    async def add_schedule(body: ScheduleIn) -> dict[str, Any]:
+        def add() -> dict[str, Any]:
+            store = worker.jarvis.store
+            item_id = store.add_schedule(body.title, body.start, body.end, body.location, body.notes, body.remind_min)
+            return _item(store.get_schedule(item_id))
+
+        try:
+            return await worker.run(add)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+    @app.patch("/api/schedule/{item_id}", dependencies=[Depends(auth)])
+    async def update_schedule(item_id: int, body: ScheduleUpdate) -> dict[str, Any]:
+        def update() -> dict[str, Any] | None:
+            store = worker.jarvis.store
+            if not store.update_schedule(item_id, **body.model_dump(exclude_none=True)):
+                return None
+            return _item(store.get_schedule(item_id))
+
+        try:
+            found = await worker.run(update)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        if found is None:
+            raise HTTPException(status_code=404, detail="no such item")
+        return found
+
+    @app.get("/api/reminders", dependencies=[Depends(auth)])
+    async def reminders() -> list[dict[str, Any]]:
+        return await worker.run(worker.reminders)
 
     @app.get("/api/overview", dependencies=[Depends(auth)])
     async def overview() -> dict[str, Any]:

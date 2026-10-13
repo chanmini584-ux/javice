@@ -5,7 +5,7 @@ from __future__ import annotations
 import platform
 from datetime import datetime, timedelta
 
-from .memory import MemoryStore
+from .memory import MemoryStore, local_naive
 
 # Kept byte-stable across turns so tools + system stay in the prompt cache.
 # Everything that changes (time, profile, goals) goes into the user turn instead.
@@ -28,6 +28,10 @@ active plan before suggesting what to do next.
 known weaknesses and strengths, and active goals. Tailor depth and tone to it. When \
 you learn something durable about them, save it with `remember` or \
 `update_profile`; when they correct you, fix or `forget` the old memory.
+- You keep the user's schedule; there is no other calendar. Whenever they mention \
+something at a date or time, add it with `add_schedule` (they should never have to \
+ask), and move or cancel items with `update_schedule`. Consider today's schedule \
+when suggesting what to do, and warn about clashes or tight gaps.
 - Cover weaknesses without being asked: if the situation touches an area the user \
 is weak in, handle that part more thoroughly or flag what they might miss.
 - Be proactive but not presumptuous. Recommend the next best action and the service \
@@ -69,6 +73,11 @@ def situation_block(store: MemoryStore, now: datetime | None = None) -> str:
             lines.append(f"  - #{g.id} {g.title}{due} [{done}/{len(steps)} steps done]")
             if nxt:
                 lines.append(f"      next: step #{nxt.id} ({nxt.status}) {nxt.description}")
+    items = store.schedule(now, days=2)
+    if items:
+        today = local_naive(now).date().isoformat()
+        lines.append("schedule (today and tomorrow, local time):")
+        lines += [f"  - {'today' if i.start.startswith(today) else 'tomorrow'} {i.describe()}" for i in items]
     scene = store.get_state("vision_scene")
     if scene:
         seen_at, _, description = scene.partition("|")

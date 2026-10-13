@@ -7,6 +7,7 @@ model can read/write the rest through tools.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,9 @@ MEMORY_KINDS = ("fact", "preference", "weakness", "strength", "event", "insight"
 GOAL_STATUSES = ("active", "done", "dropped")
 STEP_STATUSES = ("todo", "doing", "done", "blocked")
 MEMO_STATUSES = ("pending", "kept", "promoted")
+SCHEDULE_STATUSES = ("scheduled", "done", "cancelled")
+# A reminder still fires this long after the start time (e.g. the PC was asleep), never later.
+REMINDER_GRACE = timedelta(minutes=10)
 
 # How long a voice memo survives without being mentioned again, by importance.
 # None = keep until JARVIS or the user removes it. Re-mentioning resets the clock.
@@ -83,6 +87,19 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id);
+CREATE TABLE IF NOT EXISTS schedule (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    start TEXT NOT NULL,          -- local wall time: 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD' for all day
+    end TEXT,
+    location TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    remind_min INTEGER NOT NULL DEFAULT 10,
+    reminded_at TEXT,
+    status TEXT NOT NULL DEFAULT 'scheduled',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS schedule_start ON schedule(status, start);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -124,6 +141,51 @@ class Memo:
     status: str
     created_at: str
     last_seen_at: str
+
+
+def local_naive(dt: datetime) -> datetime:
+    """Schedule times are the user's wall-clock time on this PC."""
+    return dt.astimezone().replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def parse_when(value: str) -> tuple[str, bool]:
+    """Normalize '2026-10-15', '2026-10-15 15:00' or ISO '2026-10-15T15:00:00' -> (text, all_day).
+
+    Seconds and any UTC offset are dropped: the time is read as the user's local wall time.
+    """
+    m = re.match(r"\s*(\d{4}-\d{2}-\d{2})(?:[T ](\d{1,2}):(\d{2}))?", value or "")
+    if not m:
+        raise ValueError(f"unrecognized date/time {value!r}; use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'")
+    date, hour, minute = m.groups()
+    dt = datetime.strptime(f"{date} {hour or 0}:{minute or 0}", "%Y-%m-%d %H:%M")  # validates ranges
+    return (dt.strftime("%Y-%m-%d"), True) if hour is None else (dt.strftime("%Y-%m-%d %H:%M"), False)
+
+
+@dataclass
+class ScheduleItem:
+    id: int
+    title: str
+    start: str
+    end: str | None
+    location: str
+    notes: str
+    remind_min: int
+    reminded_at: str | None
+    status: str
+    created_at: str
+
+    @property
+    def all_day(self) -> bool:
+        return len(self.start) == 10
+
+    @property
+    def start_dt(self) -> datetime:
+        return datetime.strptime(self.start, "%Y-%m-%d" if self.all_day else "%Y-%m-%d %H:%M")
+
+    def describe(self) -> str:
+        when = f"{self.start} (all day)" if self.all_day else self.start + (f"~{self.end[-5:]}" if self.end else "")
+        extra = f" @ {self.location}" if self.location else ""
+        return f"#{self.id} {when} {self.title}{extra}"
 
 
 @dataclass
@@ -378,6 +440,85 @@ class MemoryStore:
         sql += " ORDER BY at DESC, id DESC LIMIT ?"
         params.append(limit)
         return [dict(r) for r in self._db.execute(sql, params)]
+
+    # --- schedule (JARVIS's own calendar) ---------------------------------
+
+    def add_schedule(
+        self, title: str, start: str, end: str | None = None, location: str = "", notes: str = "", remind_min: int = 10
+    ) -> int:
+        start_text, all_day = parse_when(start)
+        end_text = parse_when(end)[0] if end else None
+        if end_text and end_text < start_text:
+            raise ValueError("end is before start")
+        with self._db:
+            cur = self._db.execute(
+                "INSERT INTO schedule(title, start, end, location, notes, remind_min, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (title.strip(), start_text, end_text, location, notes, 0 if all_day else max(0, remind_min), _now()),
+            )
+        return int(cur.lastrowid)
+
+    def get_schedule(self, item_id: int) -> ScheduleItem | None:
+        row = self._db.execute("SELECT * FROM schedule WHERE id = ?", (item_id,)).fetchone()
+        return ScheduleItem(**dict(row)) if row else None
+
+    def schedule(self, start: datetime, days: int = 7, include_closed: bool = False) -> list[ScheduleItem]:
+        """Items whose start falls on the local dates [start.date(), start.date() + days)."""
+        first = local_naive(start).date()
+        last = first + timedelta(days=days)
+        sql = "SELECT * FROM schedule WHERE start >= ? AND start < ?"
+        if not include_closed:
+            sql += " AND status = 'scheduled'"
+        rows = self._db.execute(sql + " ORDER BY start, id", (first.isoformat(), last.isoformat()))
+        return [ScheduleItem(**dict(r)) for r in rows]
+
+    def update_schedule(self, item_id: int, **fields) -> bool:
+        item = self.get_schedule(item_id)
+        if item is None:
+            return False
+        updates: dict = {}
+        for key in ("title", "location", "notes"):
+            if fields.get(key) is not None:
+                updates[key] = fields[key]
+        if fields.get("start"):
+            updates["start"], all_day = parse_when(fields["start"])
+            updates["reminded_at"] = None  # moved: remind again
+            if all_day:
+                updates["remind_min"] = 0
+        if fields.get("end"):
+            updates["end"] = parse_when(fields["end"])[0]
+        if fields.get("remind_min") is not None:
+            updates["remind_min"] = max(0, int(fields["remind_min"]))
+            updates["reminded_at"] = None
+        if fields.get("status") is not None:
+            if fields["status"] not in SCHEDULE_STATUSES:
+                raise ValueError(f"status must be one of {SCHEDULE_STATUSES}")
+            updates["status"] = fields["status"]
+        if not updates:
+            return True
+        cols = ", ".join(f"{k} = ?" for k in updates)
+        with self._db:
+            self._db.execute(f"UPDATE schedule SET {cols} WHERE id = ?", (*updates.values(), item_id))
+        return True
+
+    def reminders_due(self, now: datetime, include_reminded: bool = False) -> list[ScheduleItem]:
+        """Timed items inside their reminder window: start - remind_min <= now <= start + grace."""
+        now = local_naive(now)
+        items = self.schedule(now - REMINDER_GRACE, days=2)
+        due = []
+        for item in items:
+            if item.all_day or (item.reminded_at and not include_reminded):
+                continue
+            start = item.start_dt
+            if start - timedelta(minutes=item.remind_min) <= now <= start + REMINDER_GRACE:
+                due.append(item)
+        return due
+
+    def mark_reminded(self, item_id: int, now: datetime | None = None) -> None:
+        with self._db:
+            self._db.execute(
+                "UPDATE schedule SET reminded_at = ? WHERE id = ?", ((now or datetime.now()).isoformat(), item_id)
+            )
 
     # --- chat transcripts (what the chat app shows; not long-term memory) ------
 

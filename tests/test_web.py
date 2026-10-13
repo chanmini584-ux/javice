@@ -159,3 +159,25 @@ def test_token_persists(tmp_path):
     p = tmp_path / "web_token"
     t = load_or_create_token(p)
     assert len(t) >= 24 and load_or_create_token(p) == t
+
+
+def test_schedule_endpoints_and_reminders(client):
+    from datetime import datetime, timedelta
+
+    soon = (datetime.now() + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+    later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
+    a = post(client, "/api/schedule", {"title": "치과", "start": soon, "location": "강남"})
+    b = post(client, "/api/schedule", {"title": "여행", "start": later})
+    assert a["all_day"] is False and b["all_day"] is True and b["remind_min"] == 0
+    assert [i["title"] for i in client.get("/api/schedule", headers=AUTH).json()] == ["치과", "여행"]
+    assert [i["id"] for i in client.get("/api/reminders", headers=AUTH).json()] == [a["id"]]
+
+    r = client.patch(f"/api/schedule/{a['id']}", json={"status": "done"}, headers=AUTH)
+    assert r.json()["status"] == "done"
+    assert client.get("/api/reminders", headers=AUTH).json() == []
+    assert [i["title"] for i in client.get("/api/schedule", headers=AUTH).json()] == ["여행"]
+
+    assert client.post("/api/schedule", json={"title": "x", "start": "내일"}, headers=AUTH).status_code == 422
+    assert client.patch("/api/schedule/999", json={"title": "x"}, headers=AUTH).status_code == 404
+    assert client.patch(f"/api/schedule/{b['id']}", json={"status": "bogus"}, headers=AUTH).status_code == 422
+    assert client.get("/api/schedule").status_code == 401

@@ -16,6 +16,7 @@ from typing import Callable
 from .agent import Jarvis
 from .briefing import briefing_due, briefing_prompt, parse_time
 from .consolidate import Consolidator
+from .memory import local_naive
 from .voice.base import Speaker, Utterance
 from .voice.listener import VoiceListener
 
@@ -103,6 +104,7 @@ class Daemon:
         ):
             self.store.set_state(LAST_COLLECT_KEY, now.date().isoformat())
             self.collect()
+        self.remind(now)
         pending = len(self.store.memos(status="pending", limit=self.consolidate_after))
         if pending and (pending >= self.consolidate_after or now - self.last_consolidation >= self.consolidate_every):
             self.consolidate(now)
@@ -118,6 +120,20 @@ class Daemon:
             except Exception as exc:  # e.g. network down: try again later, not every second
                 self._brief_retry_at = now + timedelta(minutes=10)
                 self.log(f"briefing failed, retrying in 10 min: {exc}")
+
+    def remind(self, now: datetime) -> None:
+        """Say each schedule reminder once, when its window opens."""
+        for item in self.store.reminders_due(now):
+            self.store.mark_reminded(item.id, now)
+            mins = round((item.start_dt - local_naive(now)).total_seconds() / 60)
+            when = f"{mins}분 뒤" if mins > 0 else "지금"
+            place = f", 장소는 {item.location}" if item.location else ""
+            self.log(f"reminder: {item.describe()}")
+            self.store.add_event("schedule", "reminder", item.describe(), at=now)
+            try:
+                self.speaker.say(f"{when} {item.title} 일정이 있습니다{place}.")
+            except Exception as exc:
+                self.log(f"reminder speech failed: {exc}")
 
     def collect(self) -> None:
         if self.collect_job is None or self._collecting.is_set():
