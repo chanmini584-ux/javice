@@ -77,8 +77,8 @@ Claude API(Opus 5.5) 위에 **장기 기억 · 목표/계획 · 도구 실행 ·
 
 - 수집처는 처음 실행 때 생기는 `~/.jarvis/sources.json`을 고쳐서 추가하거나 뺍니다. RSS/Atom 피드면 됩니다.
 - **예의 바른 수집**: 피드 위주로 읽고, 본문을 받을 때는 robots.txt를 지키며, 같은 사이트에 1초 간격을 두고, 이미 받은 글은 건너뜁니다. 90일 지난 글은 지웁니다(`JARVIS_KNOWLEDGE_KEEP_DAYS`).
-- **안전한 수집**: 공개 인터넷 주소의 http(s)만 가져옵니다(리다이렉트 포함). 피드 링크가 `file://`이거나 내 PC·공유기 같은 사설망을 가리키면 가져오지도 저장하지도 않습니다. 그래서 로컬·사설망 피드는 수집처로 쓸 수 없습니다.
-- 아침 브리핑은 수집한 글 제목을 읽으므로 **읽기 전용 도구만** 씁니다. 글 속 문장이 기억이나 일정을 바꾸게 할 수 없습니다.
+- **안전한 수집**: 공개 인터넷 주소의 http(s)만 가져옵니다. 요청마다(리다이렉트 포함) 실제로 연결된 주소를 확인하고, 내 PC나 공유기 같은 사설망이면 아무것도 보내지 않고 끊습니다. `file://` 같은 링크는 저장하지 않습니다. 사설망을 가리키는 링크는 본문을 가져오지 않고 피드 요약만 저장합니다. 그래서 로컬·사설망 피드는 수집처로 쓸 수 없습니다. 이름 풀이를 프록시만 하는 네트워크에서는 프록시가 연결하므로 주소 확인을 프록시에 맡깁니다.
+- 아침 브리핑은 수집한 글 제목을 읽으므로 **읽기 전용 도구만** 씁니다. 브리핑 뒤에는 실제로 말한 브리핑 내용만 대화에 남기므로, 이어지는 음성 명령에 원문 제목이 따라가지 않습니다. 다만 직접 시키는 대화(음성 명령, 웹 채팅)는 모든 도구를 씁니다. 그 대화에서 검색 결과 속 지시문을 막는 일은 시스템 프롬프트에 맡깁니다.
 - 검색은 SQLite FTS5 trigram이라 한국어 단어 안쪽까지 찾습니다. 의미 기반 검색(임베딩)은 로드맵 v0.4에 있습니다.
 - 수집한 글은 신뢰할 수 없는 데이터로 취급하도록 시스템 프롬프트에 명시해, 글 속 지시문에 자비스가 휘둘리지 않게 했습니다.
 - 지금 바로 받으려면 `jarvis collect`. 본문 추출 품질을 높이려면 `pip install trafilatura`(없으면 기본 추출기 사용).
@@ -130,7 +130,7 @@ jarvis serve                      # 웹 앱 서버 (pip install -e '.[web]')
 pytest                            # 테스트 (네트워크·마이크 불필요)
 ```
 
-환경 변수: `JARVIS_MODEL`(대화·음성 명령·브리핑, 기본 `claude-opus-5-5`), `JARVIS_MEMO_MODEL`(메모 판단, 기본 `claude-haiku-5-5`), `JARVIS_REFLECT_MODEL`(능동 사고, 기본 `claude-sonnet-5-5`; 두 값 모두 빈 값이면 `JARVIS_MODEL`), `JARVIS_COMPACT_AT_TOKENS`(대화가 이 토큰 수에 이르면 서버가 요약으로 압축, 기본 `80000`, `0`이면 끔), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`), `JARVIS_CAMERA`(빈 값이면 끔), `JARVIS_DETECTOR_WEIGHTS`(기본 `yolo11n.pt`), `JARVIS_VISION_EVERY_S`(기본 2), `JARVIS_COLLECT_TIME`(기본 `06:30`, 빈 값이면 끔), `JARVIS_KNOWLEDGE_KEEP_DAYS`(기본 90).
+환경 변수: `JARVIS_MODEL`(대화·음성 명령·브리핑, 기본 `claude-opus-5-5`), `JARVIS_MEMO_MODEL`(메모 판단, 기본 `claude-haiku-5-5`), `JARVIS_REFLECT_MODEL`(능동 사고, 기본 `claude-sonnet-5-5`; 두 값 모두 빈 값이면 `JARVIS_MODEL`), `JARVIS_COMPACT_AT_TOKENS`(대화가 이 토큰 수에 이르면 답을 전한 뒤 서버가 대화를 요약으로 압축, 기본 `80000`, `0`이면 끔. 실패하면 대화가 2만 토큰 더 늘어난 뒤 다시 시도), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`), `JARVIS_CAMERA`(빈 값이면 끔), `JARVIS_DETECTOR_WEIGHTS`(기본 `yolo11n.pt`), `JARVIS_VISION_EVERY_S`(기본 2), `JARVIS_COLLECT_TIME`(기본 `06:30`, 빈 값이면 끔), `JARVIS_KNOWLEDGE_KEEP_DAYS`(기본 90).
 
 CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/think`(추론 요약 표시), `/quit`.
 
