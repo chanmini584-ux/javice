@@ -43,6 +43,25 @@ def test_calculate_refuses_runaway_work_without_doing_it(expr):
     assert time.monotonic() - started < 0.5
 
 
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "prod([9**4400, 9**4400, 9**4400])",  # products and lcms grow with their inputs combined
+        "lcm(9**4400 + 1, 9**4400 + 3, 9**4400 + 7)",
+        "frexp(8) * 3",  # tuples repeat like lists
+        "2**20000",  # Python cannot even print an int this long (4,300-digit limit)
+    ],
+)
+def test_calculate_refuses_results_too_big_to_use(expr):
+    with pytest.raises(ToolError):
+        safe_eval(expr)
+
+
+def test_calculate_tool_refuses_huge_output(registry):
+    out, is_error = registry.execute("calculate", {"expression": "[" + ",".join(["factorial(1000)"] * 120) + "]"})
+    assert is_error and len(out) < 200
+
+
 def test_calculate_keeps_big_but_sane_numbers():
     assert safe_eval("2 ** 64") == 18446744073709551616
     assert safe_eval("comb(10**6, 2)") == 499999500000
