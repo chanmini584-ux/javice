@@ -10,6 +10,7 @@ cannot make JARVIS read local files or probe the home network (router, other PCs
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import socket
 import time
@@ -21,7 +22,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from .sources import Source
 from .store import KnowledgeBase
@@ -42,25 +43,85 @@ def _resolve(host: str, port: int) -> list[str]:
     return [info[4][0] for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+
+
 def _is_public(ip: str) -> bool:
     addr = ipaddress.ip_address(ip.split("%", 1)[0])  # drop an IPv6 zone id
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
-        addr = addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
+        elif addr in _NAT64 or addr in _IPV4_COMPATIBLE:  # an IPv4 address carried inside IPv6
+            addr = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
     return addr.is_global and not addr.is_multicast
 
 
-def check_url(url: str, resolve: Resolve = _resolve) -> None:
-    """Raise UnsafeURLError unless url is http(s) and its host resolves only to public addresses."""
+def check_url(url: str, resolve: Resolve = _resolve, proxied: bool = False) -> None:
+    """Raise UnsafeURLError unless url is http(s) and its host resolves only to public addresses.
+
+    proxied: a proxy makes the connection, so a name that only the proxy can resolve is let
+    through; literal addresses and names that resolve here are still checked.
+    """
     parts = urlparse(url)
-    if parts.scheme not in WEB_SCHEMES or not parts.hostname:
+    host = parts.hostname
+    if parts.scheme not in WEB_SCHEMES or not host:
         raise UnsafeURLError(f"only http(s) URLs are fetched: {url!r}")
+    if "%" in host:  # urllib connects to the decoded name, not the one checked here
+        raise UnsafeURLError(f"encoded host name in {url!r}")
     try:
         port = parts.port or (443 if parts.scheme == "https" else 80)
     except ValueError as exc:
         raise UnsafeURLError(f"bad port in {url!r}") from exc
-    for ip in resolve(parts.hostname, port):
+    try:
+        ips = resolve(host, port)
+    except OSError:
+        if proxied:
+            return
+        raise
+    for ip in ips:
         if not _is_public(ip):
-            raise UnsafeURLError(f"{parts.hostname} points to a non-public address ({ip})")
+            raise UnsafeURLError(f"{host} points to a non-public address ({ip})")
+
+
+def _connect_public(address, *args, **kwargs) -> socket.socket:
+    """socket.create_connection that hangs up on a non-public peer before anything is sent.
+
+    It checks the address actually connected to: a name can pass check_url and still lead
+    elsewhere (DNS rebinding, a name that urllib rewrites before connecting).
+    """
+    sock = socket.create_connection(address, *args, **kwargs)
+    peer = sock.getpeername()[0]
+    if not _is_public(peer):
+        sock.close()
+        raise UnsafeURLError(f"{address[0]} connected to a non-public address ({peer})")
+    return sock
+
+
+class _PublicHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = _connect_public
+
+
+class _PublicHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = _connect_public
+
+
+class _PublicHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req: urllib.request.Request):
+        if req.has_proxy():  # the peer is the proxy; check_url vetted the target by name
+            return super().http_open(req)
+        return self.do_open(_PublicHTTPConnection, req)
+
+
+class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req: urllib.request.Request):
+        if getattr(req, "_tunnel_host", None):  # CONNECT through a proxy: same as above
+            return super().https_open(req)
+        return self.do_open(_PublicHTTPSConnection, req, context=self._context)
 
 
 class _PublicOnly(urllib.request.BaseHandler):
@@ -70,7 +131,8 @@ class _PublicOnly(urllib.request.BaseHandler):
         self.resolve = resolve
 
     def http_request(self, req: urllib.request.Request) -> urllib.request.Request:
-        check_url(req.full_url, self.resolve)
+        proxied = req.type in urllib.request.getproxies() and not urllib.request.proxy_bypass(req.host)
+        check_url(req.full_url, self.resolve, proxied)
         return req
 
     https_request = http_request
@@ -85,8 +147,8 @@ def public_opener(resolve: Resolve = _resolve) -> urllib.request.OpenerDirector:
     for handler in (
         _PublicOnly(resolve),
         urllib.request.ProxyHandler(),
-        urllib.request.HTTPHandler(),
-        urllib.request.HTTPSHandler(),
+        _PublicHTTPHandler(),
+        _PublicHTTPSHandler(),
         urllib.request.HTTPDefaultErrorHandler(),
         urllib.request.HTTPRedirectHandler(),
         urllib.request.HTTPErrorProcessor(),
@@ -286,25 +348,26 @@ class Collector:
                 log(f"{src.name}: {exc}")
                 continue
             for item in items:
-                if urlparse(item.link).scheme not in WEB_SCHEMES:
+                link = urljoin(src.url, item.link)  # "/post/1" belongs to the feed's own site
+                if urlparse(link).scheme not in WEB_SCHEMES:
                     report.unsafe += 1  # file:, ftp:, javascript:… never fetched, never stored
                     continue
-                if self.kb.has(item.link):
+                if self.kb.has(link):
                     report.seen += 1
                     continue
                 text = item.summary
                 if src.fetch_full_text:
-                    if self.allowed(item.link):
+                    if self.allowed(link):
                         try:
-                            html = self._polite_fetch(item.link).decode("utf-8", "replace")
-                            text = extract_article(html, item.link) or text
+                            html = self._polite_fetch(link).decode("utf-8", "replace")
+                            text = extract_article(html, link) or text
                         except UnsafeURLError as exc:  # keep the feed summary only
                             report.unsafe += 1
-                            log(f"{item.link}: {exc}")
+                            log(f"{link}: {exc}")
                         except Exception as exc:
-                            log(f"{item.link}: {exc}")
+                            log(f"{link}: {exc}")
                     else:
                         report.blocked_by_robots += 1
-                self.kb.add(item.link, src.name, src.topic, item.title, text[: self.max_text_chars], item.published)
+                self.kb.add(link, src.name, src.topic, item.title, text[: self.max_text_chars], item.published)
                 report.new += 1
         return report

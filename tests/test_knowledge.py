@@ -142,28 +142,66 @@ def test_check_url_refuses_names_that_resolve_to_the_home_network():
     check_url("https://example.com/post", resolve=lambda host, port: ["93.184.216.34"])  # public: allowed
 
 
-def test_http_fetch_never_contacts_a_local_server():
-    hits = []
+@pytest.fixture
+def local_server():
+    """An HTTP server on this machine (stands in for the router, another PC, or a proxy)."""
+    hits, body = [], {"bytes": b"ANTHROPIC_API_KEY=secret"}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             hits.append(self.path)
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"ANTHROPIC_API_KEY=secret")
+            self.wfile.write(body["bytes"])
 
         def log_message(self, *args):
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        with pytest.raises(UnsafeURLError):
-            http_fetch(f"http://127.0.0.1:{server.server_port}/secret")
-        assert hits == []
-    finally:
-        server.shutdown()
-        server.server_close()
+    yield NS(port=server.server_port, hits=hits, body=body)
+    server.shutdown()
+    server.server_close()
+
+
+def test_http_fetch_never_contacts_a_local_server(local_server):
+    with pytest.raises(UnsafeURLError):
+        http_fetch(f"http://127.0.0.1:{local_server.port}/secret")
+    assert local_server.hits == []
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhos%74"])
+def test_guard_checks_the_address_actually_connected_to(local_server, host):
+    # A name can pass the DNS check and still connect somewhere else: DNS rebinding, or a
+    # %-encoded name that urllib decodes before connecting. The connected peer is checked.
+    opener = public_opener(resolve=lambda name, port: ["93.184.216.34"])  # the attacker's DNS says "public"
+    with pytest.raises(UnsafeURLError):
+        opener.open(f"http://{host}:{local_server.port}/secret", timeout=5)
+    assert local_server.hits == []
+
+
+def test_feeds_come_through_a_proxy_that_resolves_names_itself(local_server, monkeypatch):
+    # Some school and office networks resolve outside names only at the proxy.
+    local_server.body["bytes"] = RSS
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{local_server.port}")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    assert parse_feed(http_fetch("http://feeds.invalid/rss"))[0].link == "https://example.com/rust"
+    assert local_server.hits == ["http://feeds.invalid/rss"]
+
+
+@pytest.mark.parametrize("ip", ["64:ff9b::7f00:1", "64:ff9b::c0a8:1", "::7f00:1"])
+def test_ipv6_forms_that_carry_a_private_ipv4_are_refused(ip):
+    with pytest.raises(UnsafeURLError):
+        check_url("http://sneaky.example/", resolve=lambda host, port: [ip])
+
+
+def test_relative_feed_links_are_made_absolute():
+    feed = b"""<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Post</title><link>/post/1</link><description>x</description></item></channel></rss>"""
+    kb = KnowledgeBase()
+    Collector(kb, fetch=lambda url: feed, min_interval_s=0).collect([Source("s", "https://example.com/rss", "it")])
+    assert kb.has("https://example.com/post/1")
 
 
 def test_redirect_into_the_home_network_is_not_followed():
