@@ -18,7 +18,7 @@ from .agent import FALLBACK_BETA
 from .briefing import parse_time
 from .config import Settings
 from .memory import MemoryStore, local_naive
-from .prompts import situation_block
+from .prompts import data_line, situation_block
 
 LAST_SLOT_KEY = "last_reflection_slot"
 MAX_NOTICES = 3
@@ -124,7 +124,7 @@ class Reflector:
             docs = self.knowledge.recent(now - timedelta(days=1), limit=15)
             parts.append(
                 "<new_articles>\n"
-                + ("\n".join(f"- [{d.topic}] {d.title} ({d.source})" for d in docs) or "(none)")
+                + ("\n".join(f"- [{d.topic}] {data_line(d.title)} ({data_line(d.source)})" for d in docs) or "(none)")
                 + "\n</new_articles>"
             )
         recent = store.notices(limit=15)

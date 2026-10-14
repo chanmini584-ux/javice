@@ -116,6 +116,30 @@ def test_confirm_tool_requires_approval():
     assert result["is_error"] and "declined" in result["content"]
 
 
+WRITE_TOOLS = {"remember", "forget", "update_profile", "add_goal", "save_plan", "update_status",
+               "add_schedule", "update_schedule", "run_python"}
+
+
+def test_readonly_turn_hides_and_refuses_write_tools():
+    # Unattended runs read untrusted text (feeds, search results): no tool that changes anything.
+    agent, client, store = make(
+        [msg([tool_use("t1", "forget", {"memory_id": 1})], "tool_use"), msg([text("ok")], "end_turn")]
+    )
+    store.remember("fact", "중요한 기억", 5)
+    agent.ask("브리핑해줘", readonly=True)
+    offered = {t["name"] for t in client.calls[0]["tools"]}
+    assert {"recall", "search_memos", "list_goals", "list_schedule", "calculate", "web_search"} <= offered
+    assert not offered & WRITE_TOOLS
+    refused = client.calls[1]["messages"][-1]["content"][0]
+    assert refused["is_error"] and store.recall("중요한")  # the memory survived
+
+
+def test_normal_turn_keeps_write_tools():
+    agent, client, _ = make([msg([text("ok")], "end_turn")])
+    agent.ask("목요일 3시 치과")
+    assert WRITE_TOOLS <= {t["name"] for t in client.calls[0]["tools"]}
+
+
 def test_pause_turn_resends_and_step_limit():
     agent, client, _ = make(
         [msg([text("searching")], "pause_turn"), msg([text("done")], "end_turn")]

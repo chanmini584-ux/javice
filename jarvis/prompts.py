@@ -44,6 +44,11 @@ that supports it. Reply in the language the user writes in.
 """
 
 
+def data_line(text: str) -> str:
+    """Untrusted text (an article title…) as one line that cannot open or close a prompt tag."""
+    return " ".join(text.split()).replace("<", "&lt;").replace(">", "&gt;")
+
+
 def situation_block(store: MemoryStore, now: datetime | None = None) -> str:
     now = now or datetime.now().astimezone()
     lines = [

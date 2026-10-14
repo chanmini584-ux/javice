@@ -106,9 +106,11 @@ class StubJarvis(Jarvis):
     def __init__(self, store, settings):
         super().__init__(settings, store=store, client=object())
         self.asked = []
+        self.readonly = []
 
-    def ask(self, text):
+    def ask(self, text, readonly=False):
         self.asked.append(text)
+        self.readonly.append(readonly)
         return NS(text=f"answer to: {text[:20]}")
 
 
@@ -176,11 +178,19 @@ def test_morning_briefing_once_per_day():
     assert len(speaker.said) == 2
 
 
+def test_briefing_is_read_only_but_voice_commands_are_not():
+    # The briefing reads collected articles with nobody watching; a command is the owner speaking.
+    d, jarvis, _, _ = make_daemon(lambda: datetime(2026, 10, 11, 7, 45), briefing_time="07:30")
+    d.tick()
+    d.handle(utt("자비스, 목요일 3시 치과 잡아줘"))
+    assert jarvis.readonly == [True, False]
+
+
 def test_failed_briefing_backs_off():
     now = [datetime(2026, 10, 11, 7, 45)]
     d, jarvis, speaker, _ = make_daemon(lambda: now[0], briefing_time="07:30")
 
-    def boom(text):
+    def boom(text, readonly=False):
         jarvis.asked.append(text)
         raise ConnectionError("offline")
 

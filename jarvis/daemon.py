@@ -190,7 +190,8 @@ class Daemon:
         now = now or self.clock()
         self.consolidate(now)  # fold in last night's memos first
         self.jarvis.reset()  # a new day starts a new conversation; long-term memory stays
-        text = self.jarvis.ask(briefing_prompt(self.store, now, self.jarvis.knowledge)).text
+        # Read-only: the prompt carries collected article titles and nobody is watching.
+        text = self.jarvis.ask(briefing_prompt(self.store, now, self.jarvis.knowledge), readonly=True).text
         self.store.set_state(LAST_BRIEFING_KEY, now.date().isoformat())
         self.speaker.say(text)
         return text

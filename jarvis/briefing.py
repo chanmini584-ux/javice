@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 
 from .memory import MemoryStore
+from .prompts import data_line
 
 BRIEFING_PROMPT = """\
 아침 브리핑을 해줘. 소리 내어 읽어줄 거라서 표나 마크다운 없이 짧은 문장으로, 2분 안에 읽을 분량으로.
@@ -39,7 +40,7 @@ def briefing_prompt(store: MemoryStore, now: datetime, knowledge=None) -> str:
 
         docs = [d for t in TOPICS for d in knowledge.recent(now - timedelta(days=1), topic=t, limit=8)]
         if docs:
-            articles = "\n".join(f"- [{d.topic}] {d.title} ({d.source})" for d in docs)
+            articles = "\n".join(f"- [{d.topic}] {data_line(d.title)} ({data_line(d.source)})" for d in docs)
     today = store.schedule(now, days=1)
     schedule = "\n".join(f"- {i.describe()}" for i in today) or "(없음)"
     return BRIEFING_PROMPT.format(memos=lines, articles=articles, schedule=schedule)

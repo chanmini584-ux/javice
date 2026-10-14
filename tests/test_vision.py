@@ -113,7 +113,7 @@ def test_briefing_waits_until_user_is_in_view():
     said = []
 
     class StubJarvis(Jarvis):
-        def ask(self, text):
+        def ask(self, text, readonly=False):
             return NS(text="좋은 아침입니다")
 
     jarvis = StubJarvis(Settings(briefing_time="07:30", vision_every_s=0), store=store, client=object(), eyes=eyes)
