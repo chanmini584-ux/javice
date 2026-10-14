@@ -17,8 +17,11 @@ from typing import Any
 
 from .agent import FALLBACK_BETA
 from .config import Settings
-from .memory import MEMORY_KINDS, STEP_STATUSES, MemoryStore
+from .memory import MEMORY_KINDS, STEP_STATUSES, MemoryStore, similarity
 from .prompts import situation_block
+
+# A proposed goal this similar to an active goal is the same goal said again.
+GOAL_REPEAT_SIMILARITY = 0.6
 
 _SYSTEM = """\
 You are the memory curator for JARVIS, a personal assistant. You receive notes \
@@ -169,9 +172,13 @@ class Consolidator:
                 store.update_memo(memo_id, importance=importance, status="kept")
                 report.kept.append(memo_id)
         for g in decision.get("new_goals", []):
-            if not g["title"].strip():
-                continue
-            goal_id = store.add_goal(g["title"], g["why"], g["deadline"] or None)
+            title = g["title"].strip()
+            if not title or any(similarity(title, a.title) >= GOAL_REPEAT_SIMILARITY for a in store.goals("active")):
+                continue  # empty, or an active goal said again
+            try:
+                goal_id = store.add_goal(title, g["why"], g["deadline"] or None)
+            except ValueError:  # a deadline that is not a date ("이번 달 말"): keep the goal without it
+                goal_id = store.add_goal(title, g["why"], None)
             steps = [s for s in g["steps"] if s.strip()]
             if steps:
                 store.save_plan(goal_id, steps)

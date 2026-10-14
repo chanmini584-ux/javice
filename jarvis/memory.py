@@ -293,6 +293,8 @@ class MemoryStore:
     # --- goals & plans -----------------------------------------------------
 
     def add_goal(self, title: str, why: str = "", deadline: str | None = None) -> int:
+        if deadline:  # stored as YYYY-MM-DD: deadlines are compared and sorted as text
+            deadline = parse_when(deadline)[0][:10]
         with self._db:
             cur = self._db.execute(
                 "INSERT INTO goals(title, why, deadline, created_at) VALUES (?, ?, ?, ?)",

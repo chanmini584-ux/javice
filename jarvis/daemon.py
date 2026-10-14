@@ -23,6 +23,9 @@ from .voice.listener import VoiceListener
 WAKE_WORD = re.compile(r"^\s*(?:헤이\s*)?(?:자비스|자빗|jarvis)[\s,.!?~]*", re.IGNORECASE)
 LAST_BRIEFING_KEY = "last_briefing_date"
 LAST_COLLECT_KEY = "last_collect_date"
+# A voice command after this much quiet starts a new conversation (long-term memory stays),
+# so the always-on conversation does not grow all day and make every command costlier.
+VOICE_SESSION_GAP = timedelta(minutes=30)
 
 
 def _in_background(job: Callable[[], None]) -> None:
@@ -64,6 +67,7 @@ class Daemon:
         self.consolidate_every = timedelta(minutes=s.consolidate_every_min)
         self.consolidate_after = s.consolidate_after_memos
         self.last_consolidation = self.clock()
+        self._last_turn_at: datetime | None = None
         self.others_heard = 0
         self._brief_retry_at: datetime | None = None
         self.vision_every = timedelta(seconds=s.vision_every_s)
@@ -84,6 +88,10 @@ class Daemon:
             command = utt.text[match.end() :].strip()
             if command:
                 self.log(f"command: {command}")
+                now = self.clock()
+                if self._last_turn_at is not None and now - self._last_turn_at > VOICE_SESSION_GAP:
+                    self.jarvis.reset()
+                self._last_turn_at = now
                 result = self.jarvis.ask(f"(음성 명령, 짧게 말로 답해줘) {command}")
                 self.speaker.say(result.text)
             return
@@ -192,6 +200,7 @@ class Daemon:
         self.jarvis.reset()  # a new day starts a new conversation; long-term memory stays
         # Read-only: the prompt carries collected article titles and nobody is watching.
         text = self.jarvis.ask(briefing_prompt(self.store, now, self.jarvis.knowledge), readonly=True).text
+        self._last_turn_at = now  # "아까 브리핑에서…" follow-ups keep the briefing in context
         self.store.set_state(LAST_BRIEFING_KEY, now.date().isoformat())
         self.speaker.say(text)
         return text

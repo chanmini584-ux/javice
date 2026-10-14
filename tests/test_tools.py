@@ -1,5 +1,6 @@
 import json
 import math
+import time
 
 import pytest
 
@@ -21,6 +22,32 @@ def test_safe_eval():
     for bad in ("__import__('os')", "open('x')", "(1).real", "9 ** 99999"):
         with pytest.raises(ToolError):
             safe_eval(bad)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "factorial(10**6)",
+        "(10**5000)**2000",
+        "comb(4 * 10**6, 2 * 10**6)",
+        "perm(10**6, 5 * 10**5)",
+        "round(5, -10**7)",  # rounds by computing 10**(10**7)
+        "sum([1] * 10**9)",  # list repetition: a billion-element list
+    ],
+)
+def test_calculate_refuses_runaway_work_without_doing_it(expr):
+    # One slow `calculate` call would freeze the agent's only thread (voice loop or web worker).
+    started = time.monotonic()
+    with pytest.raises(ToolError):
+        safe_eval(expr)
+    assert time.monotonic() - started < 0.5
+
+
+def test_calculate_keeps_big_but_sane_numbers():
+    assert safe_eval("2 ** 64") == 18446744073709551616
+    assert safe_eval("comb(10**6, 2)") == 499999500000
+    assert safe_eval("factorial(20)") == 2432902008176640000
+    assert math.isclose(safe_eval("1.0001 ** 20000"), 7.3870, rel_tol=1e-3)  # float powers stay allowed
 
 
 def test_definitions_are_sorted_and_strict_shaped(registry):

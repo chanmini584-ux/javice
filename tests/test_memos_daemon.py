@@ -94,6 +94,24 @@ def test_consolidator_applies_decisions():
     assert "<memos>" in client.params["messages"][0]["content"]
 
 
+def test_consolidator_skips_repeated_goals_and_keeps_goals_with_vague_deadlines():
+    store = MemoryStore()
+    store.add_goal("영어 공부", "이직")
+    m, _ = store.add_memo("영어 공부 진짜 해야지. 블로그도 이번 달 안에", now=T0)
+    decision = {
+        "memos": [{"id": m, "importance": 3, "action": "keep", "memory_kind": "", "memory_text": ""}],
+        "new_goals": [
+            {"title": "영어 공부하기", "why": "이직", "deadline": "", "steps": ["단어"]},  # an active goal again
+            {"title": "블로그 개설", "why": "기록", "deadline": "이번 달 말", "steps": []},  # not a date
+            {"title": "블로그 개설", "why": "기록", "deadline": "", "steps": []},  # twice in one batch
+        ],
+        "step_updates": [],
+    }
+    report = Consolidator(FakeClient(decision), store, Settings()).run(now=T0)
+    assert [(g.title, g.deadline) for g in store.goals()] == [("영어 공부", None), ("블로그 개설", None)]
+    assert len(report.new_goals) == 1
+
+
 class Recorder:
     def __init__(self):
         self.said = []
@@ -143,6 +161,20 @@ def test_daemon_memos_commands_and_strangers():
     assert [m.text for m in d.store.memos()] == ["우유 사야 해"]
     assert d.others_heard == 1
     assert "오늘 일정 알려줘" in jarvis.asked[0] and speaker.said
+
+
+def test_voice_conversation_starts_fresh_after_a_quiet_gap():
+    # Without this the always-on conversation grows all day (more tokens and cost on every command).
+    now = [T0]
+    d, jarvis, _, _ = make_daemon(lambda: now[0], briefing_time="")
+    d.handle(utt("자비스, 내일 날씨 어때?"))
+    jarvis.messages = ["earlier turns"]
+    now[0] += timedelta(minutes=10)
+    d.handle(utt("자비스, 그럼 우산 챙길까?"))  # a follow-up keeps the context
+    assert jarvis.messages == ["earlier turns"]
+    now[0] += timedelta(minutes=31)
+    d.handle(utt("자비스, 오늘 할 일 알려줘"))
+    assert jarvis.messages == []
 
 
 def test_daemon_consolidates_on_interval_or_backlog():
