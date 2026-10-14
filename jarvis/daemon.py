@@ -22,10 +22,21 @@ from .voice.listener import VoiceListener
 
 WAKE_WORD = re.compile(r"^\s*(?:헤이\s*)?(?:자비스|자빗|jarvis)[\s,.!?~]*", re.IGNORECASE)
 LAST_BRIEFING_KEY = "last_briefing_date"
+BRIEFING_TURN = "(아침 브리핑을 해줘)"
 LAST_COLLECT_KEY = "last_collect_date"
 # A voice command after this much quiet starts a new conversation (long-term memory stays),
 # so the always-on conversation does not grow all day and make every command costlier.
 VOICE_SESSION_GAP = timedelta(minutes=30)
+
+
+def _until(minutes: int) -> str:
+    """How far away something is, the way a person says it: "7일 뒤", "1시간 30분 뒤"."""
+    if minutes <= 0:
+        return "지금"
+    days, rest = divmod(minutes, 24 * 60)
+    hours, mins = divmod(rest, 60)
+    parts = [f"{days}일" if days else "", f"{hours}시간" if hours else "", f"{mins}분" if mins and not days else ""]
+    return " ".join(p for p in parts if p) + " 뒤"
 
 
 def _in_background(job: Callable[[], None]) -> None:
@@ -138,8 +149,7 @@ class Daemon:
         """Say each schedule reminder once, when its window opens."""
         for item in self.store.reminders_due(now):
             self.store.mark_reminded(item.id, now)
-            mins = round((item.start_dt - local_naive(now)).total_seconds() / 60)
-            when = f"{mins}분 뒤" if mins > 0 else "지금"
+            when = _until(round((item.start_dt - local_naive(now)).total_seconds() / 60))
             place = f", 장소는 {item.location}" if item.location else ""
             self.log(f"reminder: {item.describe()}")
             self.store.add_event("schedule", "reminder", item.describe(), at=now)
@@ -200,6 +210,9 @@ class Daemon:
         self.jarvis.reset()  # a new day starts a new conversation; long-term memory stays
         # Read-only: the prompt carries collected article titles and nobody is watching.
         text = self.jarvis.ask(briefing_prompt(self.store, now, self.jarvis.knowledge), readonly=True).text
+        # Keep the briefing as it was said, not the prompt behind it: voice commands that follow
+        # may use every tool and should not carry the collected titles along.
+        self.jarvis.messages = [{"role": "user", "content": BRIEFING_TURN}, {"role": "assistant", "content": text}]
         self._last_turn_at = now  # "아까 브리핑에서…" follow-ups keep the briefing in context
         self.store.set_state(LAST_BRIEFING_KEY, now.date().isoformat())
         self.speaker.say(text)

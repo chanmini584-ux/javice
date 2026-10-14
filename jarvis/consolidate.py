@@ -20,8 +20,10 @@ from .config import Settings
 from .memory import MEMORY_KINDS, STEP_STATUSES, MemoryStore, similarity
 from .prompts import situation_block
 
-# A proposed goal this similar to an active goal is the same goal said again.
-GOAL_REPEAT_SIMILARITY = 0.6
+# A proposed goal this similar to an active goal is the same goal said again. Kept high on
+# purpose: "실기 합격" next to "필기 합격" (0.69) is a different goal, and losing one is worse
+# than keeping a near-duplicate.
+GOAL_REPEAT_SIMILARITY = 0.85
 
 _SYSTEM = """\
 You are the memory curator for JARVIS, a personal assistant. You receive notes \
@@ -102,13 +104,15 @@ class ConsolidationReport:
     deleted: list[int] = field(default_factory=list)
     expired: list[int] = field(default_factory=list)
     new_goals: list[int] = field(default_factory=list)
+    repeated_goals: list[str] = field(default_factory=list)  # proposed goals skipped as already active
     step_updates: int = 0
 
     def summary(self) -> str:
-        return (
+        s = (
             f"promoted {len(self.promoted)}, kept {len(self.kept)}, deleted {len(self.deleted)}, "
             f"expired {len(self.expired)}, new goals {len(self.new_goals)}, step updates {self.step_updates}"
         )
+        return s + (f", repeated goals skipped: {', '.join(self.repeated_goals)}" if self.repeated_goals else "")
 
 
 class Consolidator:
@@ -173,8 +177,11 @@ class Consolidator:
                 report.kept.append(memo_id)
         for g in decision.get("new_goals", []):
             title = g["title"].strip()
-            if not title or any(similarity(title, a.title) >= GOAL_REPEAT_SIMILARITY for a in store.goals("active")):
-                continue  # empty, or an active goal said again
+            if not title:
+                continue
+            if any(similarity(title, a.title) >= GOAL_REPEAT_SIMILARITY for a in store.goals("active")):
+                report.repeated_goals.append(title)  # an active goal said again
+                continue
             try:
                 goal_id = store.add_goal(title, g["why"], g["deadline"] or None)
             except ValueError:  # a deadline that is not a date ("이번 달 말"): keep the goal without it

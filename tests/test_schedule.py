@@ -1,6 +1,6 @@
 """JARVIS's own schedule: storage, tools, situation/briefing, voice and web reminders."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace as NS
 
 import pytest
@@ -90,6 +90,28 @@ def test_schedule_reaches_situation_and_briefing():
     assert "today #1 2026-10-13 16:00 팀 회의" in block and "tomorrow #2" in block and "다음 주" not in block
     prompt = briefing_prompt(s, NOW)
     assert "#1 2026-10-13 16:00 팀 회의" in prompt and "치과" not in prompt.split("</schedule_today>")[0]
+
+
+def test_absurd_reminder_lead_is_capped_and_cannot_break_other_reminders():
+    s = MemoryStore()
+    s.add_schedule("치과", "2026-10-14 10:05", remind_min=10)
+    odd = s.add_schedule("이상한 값", "2026-10-20 10:00", remind_min=5_000_000_000)
+    assert s.get_schedule(odd).remind_min == 7 * 24 * 60  # the same cap as the web form
+    s.update_schedule(odd, remind_min=10**12)
+    assert s.get_schedule(odd).remind_min == 7 * 24 * 60
+    s._db.execute("UPDATE schedule SET remind_min = ? WHERE id = ?", (5_000_000_000, odd))  # saved before the cap
+    assert [i.title for i in s.reminders_due(datetime(2026, 10, 14, 10, 0))] == ["치과", "이상한 값"]
+
+
+@pytest.mark.parametrize("lead, spoken", [(7 * 24 * 60, "7일 뒤"), (24 * 60 + 120, "1일 2시간 뒤"), (90, "1시간 30분 뒤")])
+def test_reminders_days_ahead_are_spoken_in_days_and_hours(lead, spoken):
+    now = datetime(2026, 10, 13, 15, 0)
+    store = MemoryStore()
+    store.add_schedule("발표", (now + timedelta(minutes=lead)).strftime("%Y-%m-%d %H:%M"), remind_min=lead)
+    said = []
+    jarvis = Jarvis(Settings(briefing_time="", collect_time=""), store=store, client=object())
+    Daemon(jarvis, None, NS(say=said.append), NS(run=lambda now=None: None), clock=lambda: now, log=lambda s: None).tick()
+    assert said == [f"{spoken} 발표 일정이 있습니다."]
 
 
 def test_daemon_speaks_each_reminder_once():

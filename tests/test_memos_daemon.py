@@ -97,19 +97,23 @@ def test_consolidator_applies_decisions():
 def test_consolidator_skips_repeated_goals_and_keeps_goals_with_vague_deadlines():
     store = MemoryStore()
     store.add_goal("영어 공부", "이직")
-    m, _ = store.add_memo("영어 공부 진짜 해야지. 블로그도 이번 달 안에", now=T0)
+    store.add_goal("정보처리산업기사 필기 합격", "취업")
+    m, _ = store.add_memo("영어 공부 진짜 해야지. 실기도 준비하고, 블로그도 이번 달 안에", now=T0)
     decision = {
         "memos": [{"id": m, "importance": 3, "action": "keep", "memory_kind": "", "memory_text": ""}],
         "new_goals": [
-            {"title": "영어 공부하기", "why": "이직", "deadline": "", "steps": ["단어"]},  # an active goal again
+            {"title": "영어 공부", "why": "이직", "deadline": "", "steps": ["단어"]},  # an active goal again
+            {"title": "정보처리산업기사 실기 합격", "why": "취업", "deadline": "", "steps": ["기출"]},  # different
             {"title": "블로그 개설", "why": "기록", "deadline": "이번 달 말", "steps": []},  # not a date
-            {"title": "블로그 개설", "why": "기록", "deadline": "", "steps": []},  # twice in one batch
+            {"title": "블로그  개설", "why": "기록", "deadline": "", "steps": []},  # twice in one batch
         ],
         "step_updates": [],
     }
     report = Consolidator(FakeClient(decision), store, Settings()).run(now=T0)
-    assert [(g.title, g.deadline) for g in store.goals()] == [("영어 공부", None), ("블로그 개설", None)]
-    assert len(report.new_goals) == 1
+    assert [(g.title, g.deadline) for g in store.goals()] == [
+        ("영어 공부", None), ("정보처리산업기사 필기 합격", None), ("정보처리산업기사 실기 합격", None), ("블로그 개설", None)
+    ]
+    assert len(report.new_goals) == 2 and report.repeated_goals == ["영어 공부", "블로그  개설"]
 
 
 class Recorder:
@@ -208,6 +212,17 @@ def test_morning_briefing_once_per_day():
     now[0] = datetime(2026, 10, 12, 7, 30)
     d.tick()
     assert len(speaker.said) == 2
+
+
+def test_after_the_briefing_only_what_was_said_stays_in_the_conversation():
+    # The briefing prompt carried collected titles; voice commands that follow (with every tool)
+    # keep the briefing as it was spoken, not the raw material.
+    d, jarvis, speaker, _ = make_daemon(lambda: datetime(2026, 10, 11, 7, 45), briefing_time="07:30")
+    d.tick()
+    assert jarvis.messages == [
+        {"role": "user", "content": "(아침 브리핑을 해줘)"},
+        {"role": "assistant", "content": speaker.said[0]},
+    ]
 
 
 def test_briefing_is_read_only_but_voice_commands_are_not():

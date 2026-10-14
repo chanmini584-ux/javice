@@ -1,6 +1,7 @@
 """Proactive thinking: schedule slots, the judgment call, notices, and delivery."""
 
 import json
+import sqlite3
 from datetime import datetime, time, timedelta
 from types import SimpleNamespace as NS
 
@@ -101,6 +102,20 @@ def test_failed_reflection_is_retried_after_a_pause():
     assert r.due(NOW + timedelta(minutes=10))  # the 18:00 slot is still open
     r.run(NOW + timedelta(minutes=10))
     assert store.get_state(LAST_SLOT_KEY) == "2026-10-13 18:00" and len(attempts) == 2
+
+
+def test_reflection_backs_off_when_its_slot_cannot_be_recorded():
+    # e.g. the database stays locked past busy_timeout: do not rerun on every one-second tick.
+    store = MemoryStore()
+
+    def locked(key, value):
+        raise sqlite3.OperationalError("database is locked")
+
+    store.set_state = locked
+    r = Reflector(fake_client([]), store, Settings())
+    with pytest.raises(sqlite3.OperationalError):
+        r.run(NOW)
+    assert not r.due(NOW + timedelta(seconds=1))
 
 
 def test_daemon_reflects_on_schedule_and_speaks_important_notices():

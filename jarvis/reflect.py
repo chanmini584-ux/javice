@@ -144,13 +144,13 @@ class Reflector:
         now = now or datetime.now().astimezone()
         try:
             saved = self._think(now)
+            slot = self._open_slot(now)
+            if slot is not None:  # recorded inside the try: a failed write must not mean "run again now"
+                self.store.set_state(LAST_SLOT_KEY, slot)
         except Exception:
             self._retry_at = local_naive(now) + RETRY_AFTER
             raise
         self._retry_at = None
-        slot = self._open_slot(now)
-        if slot is not None:
-            self.store.set_state(LAST_SLOT_KEY, slot)
         return saved
 
     def _think(self, now: datetime) -> list[dict]:
