@@ -17,6 +17,14 @@ EventFn = Callable[[str, dict[str, Any]], None]
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
+# The only tools a read-only (unattended) turn may see or run. Unattended runs such as the
+# morning briefing read text strangers wrote (feed titles, search results) with nobody
+# watching, so nothing that changes memory, schedule or the outside world is offered.
+# A new tool stays out until it is added here.
+READ_ONLY_TOOLS = frozenset(
+    {"recall", "search_memos", "list_goals", "list_schedule", "calculate", "search_knowledge", "look"}
+)
+
 
 def _deny_all(name: str, tool_input: dict[str, Any]) -> bool:
     return False
@@ -66,18 +74,18 @@ class Jarvis:
 
     # -- request ---------------------------------------------------------------
 
-    def _tools(self) -> list[dict[str, Any]]:
-        tools = self.registry.definitions()
+    def _tools(self, readonly: bool = False) -> list[dict[str, Any]]:
+        tools = [t for t in self.registry.definitions() if not readonly or t["name"] in READ_ONLY_TOOLS]
         if self.settings.enable_web_search:
             tools.append({"type": "web_search_20260209", "name": "web_search", "max_uses": 5})
         return tools
 
-    def _request(self) -> Any:
+    def _request(self, readonly: bool = False) -> Any:
         params = dict(
             model=self.settings.model,
             max_tokens=self.settings.max_tokens,
             system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            tools=self._tools(),
+            tools=self._tools(readonly),
             messages=self.messages,
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": self.settings.effort},
@@ -95,16 +103,17 @@ class Jarvis:
 
     # -- loop ------------------------------------------------------------------
 
-    def ask(self, text: str) -> TurnResult:
+    def ask(self, text: str, readonly: bool = False) -> TurnResult:
+        """readonly: an unattended turn over untrusted text; only READ_ONLY_TOOLS are offered and run."""
         mark = len(self.messages)
         try:
-            return self._ask(text)
+            return self._ask(text, readonly)
         except BaseException:
             # Drop the unfinished turn so history never ends on a dangling tool_use.
             del self.messages[mark:]
             raise
 
-    def _ask(self, text: str) -> TurnResult:
+    def _ask(self, text: str, readonly: bool = False) -> TurnResult:
         self.messages.append(
             {
                 "role": "user",
@@ -117,7 +126,7 @@ class Jarvis:
         calls: list[str] = []
         response = None
         for step in range(1, self.settings.max_steps + 1):
-            response = self._request()
+            response = self._request(readonly)
             self.messages.append({"role": "assistant", "content": response.content})
             for block in response.content:
                 if block.type == "thinking" and getattr(block, "thinking", ""):
@@ -127,7 +136,7 @@ class Jarvis:
 
             reason = response.stop_reason
             if reason == "tool_use":
-                self.messages.append({"role": "user", "content": self._run_tools(response.content, calls)})
+                self.messages.append({"role": "user", "content": self._run_tools(response.content, calls, readonly)})
                 continue
             if reason == "pause_turn":  # server tool (web search) hit its iteration cap
                 continue
@@ -143,7 +152,7 @@ class Jarvis:
         text = _text_of(response.content) if response else ""
         return TurnResult(text + "\n\n[stopped: step limit reached]", "max_steps", self.settings.max_steps, calls)
 
-    def _run_tools(self, content: list[Any], calls: list[str]) -> list[dict[str, Any]]:
+    def _run_tools(self, content: list[Any], calls: list[str], readonly: bool = False) -> list[dict[str, Any]]:
         # All results go back in ONE user message, in order, including errors.
         results = []
         for block in content:
@@ -152,7 +161,9 @@ class Jarvis:
             calls.append(block.name)
             tool_input = dict(block.input or {})
             tool = self.registry.get(block.name)
-            if tool and tool.risk == "confirm" and not self.approve(block.name, tool_input):
+            if readonly and block.name not in READ_ONLY_TOOLS:
+                output, is_error = "Not available in an unattended run: only reading tools are allowed.", True
+            elif tool and tool.risk == "confirm" and not self.approve(block.name, tool_input):
                 output, is_error = "The user declined this action. Do not retry it; ask or adapt.", True
             else:
                 output, is_error = self.registry.execute(block.name, tool_input)

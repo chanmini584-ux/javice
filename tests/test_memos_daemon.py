@@ -94,6 +94,28 @@ def test_consolidator_applies_decisions():
     assert "<memos>" in client.params["messages"][0]["content"]
 
 
+def test_consolidator_skips_repeated_goals_and_keeps_goals_with_vague_deadlines():
+    store = MemoryStore()
+    store.add_goal("영어 공부", "이직")
+    store.add_goal("정보처리산업기사 필기 합격", "취업")
+    m, _ = store.add_memo("영어 공부 진짜 해야지. 실기도 준비하고, 블로그도 이번 달 안에", now=T0)
+    decision = {
+        "memos": [{"id": m, "importance": 3, "action": "keep", "memory_kind": "", "memory_text": ""}],
+        "new_goals": [
+            {"title": "영어 공부", "why": "이직", "deadline": "", "steps": ["단어"]},  # an active goal again
+            {"title": "정보처리산업기사 실기 합격", "why": "취업", "deadline": "", "steps": ["기출"]},  # different
+            {"title": "블로그 개설", "why": "기록", "deadline": "이번 달 말", "steps": []},  # not a date
+            {"title": "블로그  개설", "why": "기록", "deadline": "", "steps": []},  # twice in one batch
+        ],
+        "step_updates": [],
+    }
+    report = Consolidator(FakeClient(decision), store, Settings()).run(now=T0)
+    assert [(g.title, g.deadline) for g in store.goals()] == [
+        ("영어 공부", None), ("정보처리산업기사 필기 합격", None), ("정보처리산업기사 실기 합격", None), ("블로그 개설", None)
+    ]
+    assert len(report.new_goals) == 2 and report.repeated_goals == ["영어 공부", "블로그  개설"]
+
+
 class Recorder:
     def __init__(self):
         self.said = []
@@ -106,9 +128,11 @@ class StubJarvis(Jarvis):
     def __init__(self, store, settings):
         super().__init__(settings, store=store, client=object())
         self.asked = []
+        self.readonly = []
 
-    def ask(self, text):
+    def ask(self, text, readonly=False):
         self.asked.append(text)
+        self.readonly.append(readonly)
         return NS(text=f"answer to: {text[:20]}")
 
 
@@ -141,6 +165,20 @@ def test_daemon_memos_commands_and_strangers():
     assert [m.text for m in d.store.memos()] == ["우유 사야 해"]
     assert d.others_heard == 1
     assert "오늘 일정 알려줘" in jarvis.asked[0] and speaker.said
+
+
+def test_voice_conversation_starts_fresh_after_a_quiet_gap():
+    # Without this the always-on conversation grows all day (more tokens and cost on every command).
+    now = [T0]
+    d, jarvis, _, _ = make_daemon(lambda: now[0], briefing_time="")
+    d.handle(utt("자비스, 내일 날씨 어때?"))
+    jarvis.messages = ["earlier turns"]
+    now[0] += timedelta(minutes=10)
+    d.handle(utt("자비스, 그럼 우산 챙길까?"))  # a follow-up keeps the context
+    assert jarvis.messages == ["earlier turns"]
+    now[0] += timedelta(minutes=31)
+    d.handle(utt("자비스, 오늘 할 일 알려줘"))
+    assert jarvis.messages == []
 
 
 def test_daemon_consolidates_on_interval_or_backlog():
@@ -176,11 +214,38 @@ def test_morning_briefing_once_per_day():
     assert len(speaker.said) == 2
 
 
+def test_after_the_briefing_only_what_was_said_stays_in_the_conversation():
+    # The briefing prompt carried collected titles; voice commands that follow (with every tool)
+    # keep the briefing as it was spoken, not the raw material.
+    d, jarvis, speaker, _ = make_daemon(lambda: datetime(2026, 10, 11, 7, 45), briefing_time="07:30")
+    d.tick()
+    assert jarvis.messages == [
+        {"role": "user", "content": "(아침 브리핑을 해줘)"},
+        {"role": "assistant", "content": speaker.said[0]},
+    ]
+
+
+def test_a_briefing_without_text_leaves_no_empty_turn_behind():
+    # An empty assistant message mid-conversation would make every later voice command fail.
+    d, jarvis, _, _ = make_daemon(lambda: datetime(2026, 10, 11, 7, 45), briefing_time="07:30")
+    jarvis.ask = lambda text, readonly=False: NS(text="")
+    d.tick()
+    assert jarvis.messages == []
+
+
+def test_briefing_is_read_only_but_voice_commands_are_not():
+    # The briefing reads collected articles with nobody watching; a command is the owner speaking.
+    d, jarvis, _, _ = make_daemon(lambda: datetime(2026, 10, 11, 7, 45), briefing_time="07:30")
+    d.tick()
+    d.handle(utt("자비스, 목요일 3시 치과 잡아줘"))
+    assert jarvis.readonly == [True, False]
+
+
 def test_failed_briefing_backs_off():
     now = [datetime(2026, 10, 11, 7, 45)]
     d, jarvis, speaker, _ = make_daemon(lambda: now[0], briefing_time="07:30")
 
-    def boom(text):
+    def boom(text, readonly=False):
         jarvis.asked.append(text)
         raise ConnectionError("offline")
 

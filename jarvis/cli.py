@@ -167,6 +167,17 @@ def _lan_addresses() -> list[str]:
     return sorted(a for a in addrs if not a.startswith("127."))
 
 
+def _run_daemon(settings: Settings, with_voice: bool) -> None:
+    """Thread target for `serve --listen`. A thread ends silently on SystemExit (e.g. no voice
+    enrolled), so always say why always-on mode stopped; the web server then takes over."""
+    try:
+        _make_daemon(settings, with_voice=with_voice).run()
+        reason = "listener stopped"
+    except BaseException as exc:  # the thread ends either way; make the reason visible
+        reason = str(exc) or type(exc).__name__
+    print(f"\n[상시 모드 중지] {reason}\n스스로 챙기기(능동 사고)는 웹 서버가 이어서 합니다.", file=sys.stderr)
+
+
 def cmd_serve(settings: Settings, argv: list[str]) -> int:
     import threading
 
@@ -184,14 +195,16 @@ def cmd_serve(settings: Settings, argv: list[str]) -> int:
 
     _ensure_api_key(settings)
     token = load_or_create_token(settings.data_dir / "web_token")
-    # With --listen the daemon runs the scheduled reflections; otherwise the web server does.
-    app = create_app(lambda: _make_jarvis(settings), token, proactive=not args.listen)
-
+    daemon = None
     if args.listen:
-        def run_daemon() -> None:
-            _make_daemon(settings, with_voice=not args.no_voice).run()
-
-        threading.Thread(target=run_daemon, name="jarvis-daemon", daemon=True).start()
+        daemon = threading.Thread(
+            target=_run_daemon, args=(settings, not args.no_voice), name="jarvis-daemon", daemon=True
+        )
+        daemon.start()
+    # The daemon runs the scheduled reflections; whenever it is not running, the web server does.
+    app = create_app(
+        lambda: _make_jarvis(settings), token, proactive=lambda: daemon is None or not daemon.is_alive()
+    )
 
     hosts = ["127.0.0.1"] + (_lan_addresses() if args.host == "0.0.0.0" else [])
     print("\nJARVIS 웹 앱 주소 (처음 한 번 이 주소로 열면 토큰이 저장됩니다):")

@@ -26,6 +26,48 @@ _UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 _MATH_NAMES = {n: getattr(math, n) for n in dir(math) if not n.startswith("_")}
 _MATH_NAMES.update({"abs": abs, "round": round, "min": min, "max": max, "sum": sum})
 
+# A huge integer result can take minutes to compute and freezes the agent's only thread, so
+# sizes are estimated before computing. 14,000 bits is ~4,200 digits: instant to compute, past
+# any real calculation, and still printable (Python refuses int -> str beyond 4,300 digits).
+MAX_INT_BITS = 14_000
+MAX_EXPRESSION_CHARS = 2_000
+MAX_RESULT_CHARS = 10_000
+_NUMBERS = (int, float, complex)
+
+
+def _too_big(bits: int) -> None:
+    if bits > MAX_INT_BITS:
+        raise ToolError(f"result too large (over {MAX_INT_BITS:,} bits)")
+
+
+def _checked(value):
+    if isinstance(value, int):
+        _too_big(abs(value).bit_length())
+    return value
+
+
+def _int_bits(values) -> int:
+    """Combined size of the integers in values, lists and tuples included."""
+    return sum(
+        _int_bits(v) if isinstance(v, (list, tuple)) else abs(v).bit_length() if isinstance(v, int) else 0
+        for v in values
+    )
+
+
+def _precheck_call(name: str, args: list) -> None:
+    """Upper-bound the work of functions that can blow up, before running them."""
+    if name == "round" and len(args) == 2 and isinstance(args[1], int):
+        _too_big(abs(args[1]) * 4)  # round(n, -d) computes 10**d: ~3.3 bits per digit
+    if name in ("prod", "lcm", "sumprod"):  # results grow with the inputs combined
+        _too_big(_int_bits(args))
+    if name not in ("factorial", "comb", "perm") or not args or not all(isinstance(a, int) for a in args):
+        return
+    n = args[0]
+    k = n if name == "factorial" or len(args) == 1 else args[1]
+    if name == "comb":
+        k = min(k, n - k)
+    _too_big(max(k, 0) * n.bit_length())  # n!/(n-k)! <= n**k
+
 
 def safe_eval(expression: str) -> float | int:
     """Evaluate arithmetic + math.* functions without exec/eval."""
@@ -37,9 +79,11 @@ def safe_eval(expression: str) -> float | int:
             return node.value
         if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
             left, right = ev(node.left), ev(node.right)
-            if isinstance(node.op, ast.Pow) and abs(right) > 10_000:
-                raise ToolError("exponent too large")
-            return _BIN_OPS[type(node.op)](left, right)
+            if not isinstance(left, _NUMBERS) or not isinstance(right, _NUMBERS):  # [1] * 10**9: a huge list
+                raise ToolError("arithmetic works on numbers; lists only go into functions such as sum()")
+            if isinstance(node.op, ast.Pow) and isinstance(left, int) and isinstance(right, int) and right > 0:
+                _too_big((abs(left).bit_length() - 1) * right)  # float powers overflow quickly on their own
+            return _checked(_BIN_OPS[type(node.op)](left, right))
         if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
             return _UNARY_OPS[type(node.op)](ev(node.operand))
         if isinstance(node, ast.Name) and node.id in _MATH_NAMES:
@@ -47,11 +91,15 @@ def safe_eval(expression: str) -> float | int:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _MATH_NAMES:
             if node.keywords:
                 raise ToolError("keyword arguments are not supported")
-            return _MATH_NAMES[node.func.id](*[ev(a) for a in node.args])
+            args = [ev(a) for a in node.args]
+            _precheck_call(node.func.id, args)
+            return _checked(_MATH_NAMES[node.func.id](*args))
         if isinstance(node, (ast.List, ast.Tuple)):
             return [ev(e) for e in node.elts]
         raise ToolError(f"unsupported expression element: {type(node).__name__}")
 
+    if len(expression) > MAX_EXPRESSION_CHARS:
+        raise ToolError(f"expression too long (over {MAX_EXPRESSION_CHARS} characters)")
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as exc:
@@ -184,7 +232,10 @@ def register_builtin_tools(registry: ToolRegistry, store: MemoryStore) -> None:
         {"expression": {"type": "string"}},
     )
     def calculate(expression: str) -> str:
-        return repr(safe_eval(expression))
+        out = repr(safe_eval(expression))
+        if len(out) > MAX_RESULT_CHARS:
+            raise ToolError(f"result too long to show ({len(out):,} characters)")
+        return out
 
     @registry.tool(
         "run_python",

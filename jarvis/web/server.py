@@ -92,12 +92,13 @@ class Worker:
     most recent conversations; an older one is resumed from its transcript.
     """
 
-    def __init__(self, build: Callable[[], Jarvis]) -> None:
+    def __init__(self, build: Callable[[], Jarvis], proactive: Callable[[], bool] = lambda: False) -> None:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-web")
         self._jarvis: Jarvis | None = None
         self._build = build
         self._live: OrderedDict[int, list[dict[str, Any]]] = OrderedDict()
         self._reflector = None
+        self._proactive = proactive
 
     @property
     def jarvis(self) -> Jarvis:
@@ -173,8 +174,10 @@ class Worker:
         return self._reflector
 
     def reflect_if_due(self) -> list[dict[str, Any]]:
+        if not self._proactive():  # the always-on daemon is doing the scheduled reflections
+            return []
         now = datetime.now().astimezone()
-        return self.reflector.run(now) if self.reflector.claim(now) else []
+        return self.reflector.run(now) if self.reflector.due(now) else []
 
     def overview(self) -> dict[str, Any]:
         store = self.jarvis.store
@@ -197,9 +200,10 @@ def _sse(kind: str, data: dict[str, Any]) -> str:
     return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def create_app(build: Callable[[], Jarvis], token: str, proactive: bool = False) -> FastAPI:
-    """proactive: run scheduled reflections here (off when the always-on daemon does it)."""
-    worker = Worker(build)
+def create_app(build: Callable[[], Jarvis], token: str, proactive: bool | Callable[[], bool] = False) -> FastAPI:
+    """proactive: run scheduled reflections here. A callable is asked every minute, so the
+    web server takes over whenever the always-on daemon is not running."""
+    worker = Worker(build, proactive if callable(proactive) else (lambda: proactive))
 
     async def reflection_loop() -> None:
         while True:
@@ -211,10 +215,9 @@ def create_app(build: Callable[[], Jarvis], token: str, proactive: bool = False)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        task = asyncio.create_task(reflection_loop()) if proactive else None
+        task = asyncio.create_task(reflection_loop())  # a no-op while not proactive
         yield
-        if task:
-            task.cancel()
+        task.cancel()
         worker.shutdown()
 
     app = FastAPI(title="JARVIS", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
