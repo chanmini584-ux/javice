@@ -212,3 +212,36 @@ def test_notices_and_reflect_now(client):
     r = client.post("/api/reflect", headers=AUTH)
     assert r.status_code == 502 and "network down" in r.json()["detail"]
     assert client.get("/api/notices").status_code == 401
+
+
+def test_serve_listen_hands_reflections_to_the_web_server_when_the_daemon_stops(monkeypatch, tmp_path, capsys):
+    # `serve --listen`: the daemon thread does the scheduled reflections. If it dies (no voiceprint
+    # enrolled, microphone gone) the web server must take over, and the reason must be shown.
+    import jarvis.cli as cli
+
+    release = threading.Event()
+
+    class FakeDaemon:
+        def run(self):
+            release.wait(5)
+            raise SystemExit("등록된 목소리가 없습니다.")
+
+    seen = {}
+
+    def fake_uvicorn_run(app, **kwargs):
+        worker = app.state.worker
+        worker._reflector = NS(due=lambda now: True, run=lambda now=None: ["notice"])
+        seen["while_daemon_runs"] = worker.reflect_if_due()
+        release.set()
+        for t in threading.enumerate():
+            if t.name == "jarvis-daemon":
+                t.join(5)
+        seen["after_daemon_stops"] = worker.reflect_if_due()
+        worker.shutdown()
+
+    monkeypatch.setattr(cli, "_ensure_api_key", lambda settings: None)
+    monkeypatch.setattr(cli, "_make_daemon", lambda settings, with_voice: FakeDaemon())
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    cli.cmd_serve(Settings(data_dir=tmp_path), ["--listen"])
+    assert seen == {"while_daemon_runs": [], "after_daemon_stops": ["notice"]}
+    assert "등록된 목소리가 없습니다" in capsys.readouterr().err

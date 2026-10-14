@@ -111,7 +111,7 @@ class Daemon:
         pending = len(self.store.memos(status="pending", limit=self.consolidate_after))
         if pending and (pending >= self.consolidate_after or now - self.last_consolidation >= self.consolidate_every):
             self.consolidate(now)
-        if self.reflector is not None and not self._collecting.is_set() and self.reflector.claim(now):
+        if self.reflector is not None and not self._collecting.is_set() and self.reflector.due(now):
             self.reflect(now)
         if (
             self.briefing_at

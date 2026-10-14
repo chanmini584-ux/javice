@@ -51,6 +51,17 @@ def test_store_range_update_and_reminder_window():
     assert s.update_schedule(999, title="x") is False
 
 
+@pytest.mark.parametrize("now", [datetime(2026, 10, 14, 9, 0), datetime(2026, 10, 19, 0, 5)])
+def test_reminder_set_days_ahead_fires_when_its_window_opens(now):
+    # The web form allows reminders up to 7 days ahead; they must not wait until the last 2 days.
+    s = MemoryStore()
+    s.add_schedule("기말고사", "2026-10-21 09:00", remind_min=7 * 24 * 60)
+    s.add_schedule("발표", "2026-10-20 23:59", remind_min=2 * 24 * 60 - 1)  # opens 10/19 00:00
+    due = {i.title for i in s.reminders_due(now)}
+    assert "기말고사" in due and ("발표" in due) == (now.day == 19)
+    assert s.reminders_due(datetime(2026, 10, 14, 8, 59)) == []
+
+
 def test_tools_add_list_update():
     jarvis = Jarvis(Settings(), store=MemoryStore(), client=object())
     run = jarvis.registry.execute

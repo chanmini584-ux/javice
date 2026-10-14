@@ -513,7 +513,12 @@ class MemoryStore:
     def reminders_due(self, now: datetime, include_reminded: bool = False) -> list[ScheduleItem]:
         """Timed items inside their reminder window: start - remind_min <= now <= start + grace."""
         now = local_naive(now)
-        items = self.schedule(now - REMINDER_GRACE, days=2)
+        # Look as far ahead as the longest reminder lead time (they can be days ahead).
+        (lead,) = self._db.execute(
+            "SELECT COALESCE(MAX(remind_min), 0) FROM schedule WHERE status = 'scheduled'"
+        ).fetchone()
+        first, last = now - REMINDER_GRACE, now + timedelta(minutes=lead)
+        items = self.schedule(first, days=(last.date() - first.date()).days + 1)
         due = []
         for item in items:
             if item.all_day or (item.reminded_at and not include_reminded):
