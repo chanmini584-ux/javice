@@ -225,6 +225,14 @@ def test_after_the_briefing_only_what_was_said_stays_in_the_conversation():
     ]
 
 
+def test_a_briefing_without_text_leaves_no_empty_turn_behind():
+    # An empty assistant message mid-conversation would make every later voice command fail.
+    d, jarvis, _, _ = make_daemon(lambda: datetime(2026, 10, 11, 7, 45), briefing_time="07:30")
+    jarvis.ask = lambda text, readonly=False: NS(text="")
+    d.tick()
+    assert jarvis.messages == []
+
+
 def test_briefing_is_read_only_but_voice_commands_are_not():
     # The briefing reads collected articles with nobody watching; a command is the owner speaking.
     d, jarvis, _, _ = make_daemon(lambda: datetime(2026, 10, 11, 7, 45), briefing_time="07:30")

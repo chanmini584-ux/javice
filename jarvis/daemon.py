@@ -211,8 +211,11 @@ class Daemon:
         # Read-only: the prompt carries collected article titles and nobody is watching.
         text = self.jarvis.ask(briefing_prompt(self.store, now, self.jarvis.knowledge), readonly=True).text
         # Keep the briefing as it was said, not the prompt behind it: voice commands that follow
-        # may use every tool and should not carry the collected titles along.
-        self.jarvis.messages = [{"role": "user", "content": BRIEFING_TURN}, {"role": "assistant", "content": text}]
+        # may use every tool and should not carry the collected titles along. An empty answer
+        # leaves nothing (an empty assistant turn would make later requests fail).
+        self.jarvis.reset()
+        if text.strip():
+            self.jarvis.messages = [{"role": "user", "content": BRIEFING_TURN}, {"role": "assistant", "content": text}]
         self._last_turn_at = now  # "아까 브리핑에서…" follow-ups keep the briefing in context
         self.store.set_state(LAST_BRIEFING_KEY, now.date().isoformat())
         self.speaker.say(text)
