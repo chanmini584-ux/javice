@@ -17,6 +17,8 @@ class Settings:
     effort: str = "high"
     max_tokens: int = 64000
     max_steps: int = 25  # upper bound on model<->tool round trips per user turn
+    # Once a conversation reaches this many tokens, the server summarizes it (0 = never).
+    compact_at_tokens: int = 80_000
     data_dir: Path = field(default_factory=lambda: Path.home() / ".jarvis")
     enable_web_search: bool = True
     # voice / daemon
@@ -62,6 +64,7 @@ class Settings:
             effort=env.get("JARVIS_EFFORT", cls.effort),
             max_tokens=int(env.get("JARVIS_MAX_TOKENS", cls.max_tokens)),
             max_steps=int(env.get("JARVIS_MAX_STEPS", cls.max_steps)),
+            compact_at_tokens=int(env.get("JARVIS_COMPACT_AT_TOKENS", cls.compact_at_tokens)),
             data_dir=Path(env.get("JARVIS_HOME", Path.home() / ".jarvis")),
             enable_web_search=env.get("JARVIS_WEB_SEARCH", "1") != "0",
             briefing_time=env.get("JARVIS_BRIEFING_TIME", cls.briefing_time),

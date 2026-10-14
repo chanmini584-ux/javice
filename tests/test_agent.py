@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from jarvis.agent import FALLBACK_BETA, Jarvis
+from jarvis.agent import COMPACT_BETA, FALLBACK_BETA, Jarvis
 from jarvis.config import Settings
 from jarvis.memory import MemoryStore
 
@@ -32,10 +32,12 @@ class FakeStream:
 
 
 class FakeClient:
-    def __init__(self, script):
+    def __init__(self, script, compact=None):
         self.script = list(script)
         self.calls = []
-        self.beta = NS(messages=NS(stream=self._stream))
+        self.compactions = []
+        self.compact = compact  # the reply (or exception) for a compaction request
+        self.beta = NS(messages=NS(stream=self._stream, create=self._create))
 
     def _stream(self, **params):
         # Snapshot messages: the agent keeps appending to the same list.
@@ -45,16 +47,22 @@ class FakeClient:
             raise item
         return FakeStream(item)
 
+    def _create(self, **params):
+        self.compactions.append({**params, "messages": list(params["messages"])})
+        if isinstance(self.compact, BaseException):
+            raise self.compact
+        return self.compact
 
-def make(script, approve=lambda n, i: False, **settings):
-    client = FakeClient(script)
+
+def make(script, approve=lambda n, i: False, compact=None, **settings):
+    client = FakeClient(script, compact)
     store = MemoryStore()
     agent = Jarvis(Settings(**settings), store=store, client=client, approve=approve)
     return agent, client, store
 
 
-def msg(content, stop_reason):
-    return NS(content=content, stop_reason=stop_reason, stop_details=None)
+def msg(content, stop_reason, usage=None):
+    return NS(content=content, stop_reason=stop_reason, stop_details=None, usage=usage)
 
 
 def test_plain_answer_and_request_shape():
@@ -175,3 +183,50 @@ def test_text_is_streamed_to_on_event():
     agent = Jarvis(Settings(), store=MemoryStore(), client=client, on_event=lambda k, d: seen.append((k, d)))
     assert agent.ask("hi").text == "안녕하세요"
     assert [d["text"] for k, d in seen if k == "text"] == ["안녕", "하세요"]
+
+
+SUMMARY = NS(type="compaction", content="요약: 사용자와 JARVIS 확장 계획을 논의함", signature="sig")
+COMPACTED = NS(stop_reason="compaction", content=[SUMMARY])
+
+
+def used(context_tokens):
+    """Usage of a response whose request read `context_tokens` (mostly from the prompt cache)."""
+    return NS(input_tokens=1_000, cache_read_input_tokens=context_tokens - 1_500,
+              cache_creation_input_tokens=0, output_tokens=500)
+
+
+def test_long_conversation_is_compacted_in_place_after_the_turn():
+    agent, client, _ = make(
+        [msg([text("긴 답")], "end_turn", used(90_000)), msg([text("이어서")], "end_turn")], compact=COMPACTED
+    )
+    history = agent.messages  # the web app keeps one list per chat and reuses it
+    assert agent.ask("계속").text == "긴 답"
+    request = client.compactions[0]
+    assert request["compaction"]["type"] == "summarize" and COMPACT_BETA in request["betas"]
+    assert request["model"] == "claude-opus-5-5" and len(request["messages"]) == 2
+    assert history is agent.messages and agent.messages == [{"role": "assistant", "content": [SUMMARY]}]
+    agent.ask("다음 질문")
+    after = client.calls[1]
+    assert COMPACT_BETA in after["betas"] and after["messages"][0]["content"] == [SUMMARY]
+    assert [m["role"] for m in after["messages"]] == ["assistant", "user"]
+
+
+def test_short_conversation_is_not_compacted():
+    agent, client, _ = make([msg([text("ok")], "end_turn", used(20_000))], compact=COMPACTED)
+    agent.ask("hi")
+    assert client.compactions == [] and COMPACT_BETA not in client.calls[0]["betas"]
+
+
+@pytest.mark.parametrize("reply", [RuntimeError("overloaded"), NS(stop_reason="refusal", content=[])])
+def test_failed_compaction_keeps_the_conversation(reply):
+    agent, client, _ = make([msg([text("긴 답")], "end_turn", used(90_000))], compact=reply)
+    events = []
+    agent.on_event = lambda kind, data: events.append(kind)
+    assert agent.ask("계속").text == "긴 답"
+    assert len(agent.messages) == 2 and "compaction_failed" in events  # tried again after the next turn
+
+
+def test_compaction_can_be_turned_off():
+    agent, client, _ = make([msg([text("ok")], "end_turn", used(500_000))], compact=COMPACTED, compact_at_tokens=0)
+    agent.ask("hi")
+    assert client.compactions == []
