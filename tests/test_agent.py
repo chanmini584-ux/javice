@@ -49,9 +49,10 @@ class FakeClient:
 
     def _create(self, **params):
         self.compactions.append({**params, "messages": list(params["messages"])})
-        if isinstance(self.compact, BaseException):
-            raise self.compact
-        return self.compact
+        reply = self.compact.pop(0) if isinstance(self.compact, list) else self.compact
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
 
 
 def make(script, approve=lambda n, i: False, compact=None, **settings):
@@ -240,3 +241,14 @@ def test_compaction_can_be_turned_off():
     agent, client, _ = make([msg([text("ok")], "end_turn", used(500_000))], compact=COMPACTED, compact_at_tokens=0)
     agent.ask("hi")
     assert agent.compact_if_long() is None and client.compactions == []
+
+
+def test_a_successful_compaction_clears_the_wait_left_by_a_failed_one():
+    turns = [msg([text(str(t))], "end_turn", used(t)) for t in (90_000, 110_000, 95_000)]
+    agent, client, _ = make(turns, compact=[RuntimeError("overloaded"), COMPACTED, COMPACTED])
+    agent.ask("1")
+    assert agent.compact_if_long().startswith("compaction failed")  # retry waits until 110,000 tokens
+    agent.ask("2")
+    assert agent.compact_if_long().startswith("compacted")
+    agent.ask("3")  # the summarized conversation grew past the limit again
+    assert agent.compact_if_long().startswith("compacted") and len(client.compactions) == 3

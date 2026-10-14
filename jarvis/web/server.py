@@ -152,8 +152,9 @@ class Worker:
         if emit:
             emit("done", reply)
         compacted = j.compact_if_long()
-        if compacted:
-            log.info("chat %s: %s", chat_id, compacted)
+        if compacted:  # failures as warnings: the server only shows warnings and up
+            failed = compacted.startswith("compaction failed")
+            log.log(logging.WARNING if failed else logging.INFO, "chat %s: %s", chat_id, compacted)
         return reply
 
     def chats(self) -> list[dict[str, Any]]:

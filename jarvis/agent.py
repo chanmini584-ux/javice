@@ -237,7 +237,7 @@ class Jarvis:
             self._compact_retry = (id(self.messages), tokens + COMPACT_RETRY_TOKENS)
             return f"compaction failed: {type(exc).__name__}: {exc}"
         self.messages[:] = [{"role": "assistant", "content": response.content}]
-        self._last_usage = None
+        self._last_usage, self._compact_retry = None, (0, 0)  # the summary starts the count afresh
         return f"compacted a {tokens:,}-token conversation"
 
 
