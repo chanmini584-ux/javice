@@ -105,6 +105,9 @@ class Daemon:
                 self._last_turn_at = now
                 result = self.jarvis.ask(f"(음성 명령, 짧게 말로 답해줘) {command}")
                 self.speaker.say(result.text)
+                compacted = self.jarvis.compact_if_long()  # after speaking: the answer never waits for it
+                if compacted:
+                    self.log(compacted)
             return
         memo_id, is_new = self.store.add_memo(utt.text)
         self.log(f"memo #{memo_id} {'new' if is_new else 're-mentioned'}: {utt.text}")

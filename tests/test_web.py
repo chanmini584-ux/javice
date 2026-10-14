@@ -245,3 +245,16 @@ def test_serve_listen_hands_reflections_to_the_web_server_when_the_daemon_stops(
     cli.cmd_serve(Settings(data_dir=tmp_path), ["--listen"])
     assert seen == {"while_daemon_runs": [], "after_daemon_stops": ["notice"]}
     assert "등록된 목소리가 없습니다" in capsys.readouterr().err
+
+
+def test_chat_reply_is_delivered_before_compaction(client):
+    # "done" unlocks the chat window and starts read-aloud; a slow summary must come after it.
+    worker = client.app.state.worker
+    order = []
+
+    def run():
+        worker.jarvis.compact_if_long = lambda: order.append("compact")
+        worker.chat(None, "안녕", lambda kind, data: order.append(kind))
+
+    worker._pool.submit(run).result()
+    assert order[-2:] == ["done", "compact"] and order.count("done") == 1

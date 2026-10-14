@@ -195,15 +195,18 @@ def used(context_tokens):
               cache_creation_input_tokens=0, output_tokens=500)
 
 
-def test_long_conversation_is_compacted_in_place_after_the_turn():
+def test_long_conversation_is_compacted_in_place_once_the_answer_is_out():
     agent, client, _ = make(
         [msg([text("긴 답")], "end_turn", used(90_000)), msg([text("이어서")], "end_turn")], compact=COMPACTED
     )
     history = agent.messages  # the web app keeps one list per chat and reuses it
-    assert agent.ask("계속").text == "긴 답"
-    request = client.compactions[0]
-    assert request["compaction"]["type"] == "summarize" and COMPACT_BETA in request["betas"]
-    assert request["model"] == "claude-opus-5-5" and len(request["messages"]) == 2
+    assert agent.ask("계속").text == "긴 답" and client.compactions == []  # the answer is not held back
+    assert agent.compact_if_long() == "compacted a 90,000-token conversation"
+    request, turn = client.compactions[0], client.calls[0]
+    assert request["compaction"]["type"] == "summarize" and request["betas"] == [COMPACT_BETA]
+    assert "fallbacks" not in request and "format" not in request["output_config"]
+    for same in ("model", "system", "tools", "thinking", "output_config", "cache_control"):  # keeps the prompt cache
+        assert request[same] == turn[same], same
     assert history is agent.messages and agent.messages == [{"role": "assistant", "content": [SUMMARY]}]
     agent.ask("다음 질문")
     after = client.calls[1]
@@ -214,19 +217,26 @@ def test_long_conversation_is_compacted_in_place_after_the_turn():
 def test_short_conversation_is_not_compacted():
     agent, client, _ = make([msg([text("ok")], "end_turn", used(20_000))], compact=COMPACTED)
     agent.ask("hi")
+    assert agent.compact_if_long() is None
     assert client.compactions == [] and COMPACT_BETA not in client.calls[0]["betas"]
 
 
 @pytest.mark.parametrize("reply", [RuntimeError("overloaded"), NS(stop_reason="refusal", content=[])])
-def test_failed_compaction_keeps_the_conversation(reply):
-    agent, client, _ = make([msg([text("긴 답")], "end_turn", used(90_000))], compact=reply)
-    events = []
-    agent.on_event = lambda kind, data: events.append(kind)
-    assert agent.ask("계속").text == "긴 답"
-    assert len(agent.messages) == 2 and "compaction_failed" in events  # tried again after the next turn
+def test_failed_compaction_keeps_the_conversation_and_waits_before_retrying(reply):
+    agent, client, _ = make(
+        [msg([text("긴 답")], "end_turn", used(90_000)), msg([text("또")], "end_turn", used(100_000)),
+         msg([text("또또")], "end_turn", used(112_000))],
+        compact=reply,
+    )
+    agent.ask("계속")
+    assert agent.compact_if_long().startswith("compaction failed") and len(agent.messages) == 2
+    agent.ask("계속")
+    assert agent.compact_if_long() is None and len(client.compactions) == 1  # not again 10k tokens later
+    agent.ask("계속")
+    assert agent.compact_if_long().startswith("compaction failed") and len(client.compactions) == 2
 
 
 def test_compaction_can_be_turned_off():
     agent, client, _ = make([msg([text("ok")], "end_turn", used(500_000))], compact=COMPACTED, compact_at_tokens=0)
     agent.ask("hi")
-    assert client.compactions == []
+    assert agent.compact_if_long() is None and client.compactions == []

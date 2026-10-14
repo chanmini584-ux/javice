@@ -181,6 +181,15 @@ def test_daemon_memos_commands_and_strangers():
     assert "오늘 일정 알려줘" in jarvis.asked[0] and speaker.said
 
 
+def test_voice_answer_is_spoken_before_the_conversation_is_compacted():
+    d, jarvis, speaker, _ = make_daemon(lambda: T0, briefing_time="")
+    order = []
+    speaker.say = lambda text: order.append("say")
+    jarvis.compact_if_long = lambda: order.append("compact") or "compacted a 90,000-token conversation"
+    d.handle(utt("자비스, 아까 얘기 계속해줘"))
+    assert order == ["say", "compact"]
+
+
 def test_voice_conversation_starts_fresh_after_a_quiet_gap():
     # Without this the always-on conversation grows all day (more tokens and cost on every command).
     now = [T0]
