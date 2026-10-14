@@ -370,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(result.text.rsplit("\n\n", 1)[-1])
         else:
             print(f"\n{result.text}")
+        compacted = jarvis.compact_if_long()  # after the answer is shown; a one-shot prompt never needs it
+        if compacted:
+            print(f"  · {compacted}", file=sys.stderr)
 
 
 if __name__ == "__main__":

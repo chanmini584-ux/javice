@@ -155,7 +155,7 @@ class Reflector:
 
     def _think(self, now: datetime) -> list[dict]:
         response = self.client.beta.messages.create(
-            model=self.settings.model,
+            model=self.settings.reflect_model or self.settings.model,
             max_tokens=8000,
             system=_SYSTEM,
             messages=[{"role": "user", "content": self.material(now)}],

@@ -1,6 +1,7 @@
 """Web API tests with FastAPI's TestClient and a stub agent (no network)."""
 
 import json
+import logging
 import threading
 from types import SimpleNamespace as NS
 
@@ -245,3 +246,29 @@ def test_serve_listen_hands_reflections_to_the_web_server_when_the_daemon_stops(
     cli.cmd_serve(Settings(data_dir=tmp_path), ["--listen"])
     assert seen == {"while_daemon_runs": [], "after_daemon_stops": ["notice"]}
     assert "등록된 목소리가 없습니다" in capsys.readouterr().err
+
+
+def test_chat_reply_is_delivered_before_compaction(client):
+    # "done" unlocks the chat window and starts read-aloud; a slow summary must come after it.
+    worker = client.app.state.worker
+    order = []
+
+    def run():
+        worker.jarvis.compact_if_long = lambda: order.append("compact")
+        worker.chat(None, "안녕", lambda kind, data: order.append(kind))
+
+    worker._pool.submit(run).result()
+    assert order[-2:] == ["done", "compact"] and order.count("done") == 1
+
+
+def test_failed_compaction_is_logged_where_the_server_shows_it(client, caplog):
+    # The server only shows warnings and up; a failed compaction must not vanish.
+    worker = client.app.state.worker
+
+    def run():
+        worker.jarvis.compact_if_long = lambda: "compaction failed: RuntimeError: overloaded"
+        worker.chat(None, "안녕")
+
+    with caplog.at_level(logging.WARNING, logger="jarvis.web"):
+        worker._pool.submit(run).result()
+    assert any(r.levelno == logging.WARNING and "compaction failed" in r.getMessage() for r in caplog.records)

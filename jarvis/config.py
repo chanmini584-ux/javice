@@ -9,11 +9,16 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
-    model: str = "claude-opus-5-5"
+    model: str = "claude-opus-5-5"  # conversation, voice commands, briefing
+    # Background jobs run on smaller models; an empty value means "use `model`".
+    memo_model: str = "claude-haiku-5-5"  # memo judgment: classification and extraction, often
+    reflect_model: str = "claude-sonnet-5-5"  # proactive thinking: judgment, a few times a day
     # Opus 5.5 defaults to "medium"; planning/judgment work benefits from more depth.
     effort: str = "high"
     max_tokens: int = 64000
     max_steps: int = 25  # upper bound on model<->tool round trips per user turn
+    # Once a conversation reaches this many tokens, the server summarizes it (0 = never).
+    compact_at_tokens: int = 80_000
     data_dir: Path = field(default_factory=lambda: Path.home() / ".jarvis")
     enable_web_search: bool = True
     # voice / daemon
@@ -54,9 +59,12 @@ class Settings:
         env = os.environ
         return cls(
             model=env.get("JARVIS_MODEL", cls.model),
+            memo_model=env.get("JARVIS_MEMO_MODEL", cls.memo_model),
+            reflect_model=env.get("JARVIS_REFLECT_MODEL", cls.reflect_model),
             effort=env.get("JARVIS_EFFORT", cls.effort),
             max_tokens=int(env.get("JARVIS_MAX_TOKENS", cls.max_tokens)),
             max_steps=int(env.get("JARVIS_MAX_STEPS", cls.max_steps)),
+            compact_at_tokens=int(env.get("JARVIS_COMPACT_AT_TOKENS", cls.compact_at_tokens)),
             data_dir=Path(env.get("JARVIS_HOME", Path.home() / ".jarvis")),
             enable_web_search=env.get("JARVIS_WEB_SEARCH", "1") != "0",
             briefing_time=env.get("JARVIS_BRIEFING_TIME", cls.briefing_time),

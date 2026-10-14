@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from jarvis.agent import FALLBACK_BETA, Jarvis
+from jarvis.agent import COMPACT_BETA, FALLBACK_BETA, Jarvis
 from jarvis.config import Settings
 from jarvis.memory import MemoryStore
 
@@ -32,10 +32,12 @@ class FakeStream:
 
 
 class FakeClient:
-    def __init__(self, script):
+    def __init__(self, script, compact=None):
         self.script = list(script)
         self.calls = []
-        self.beta = NS(messages=NS(stream=self._stream))
+        self.compactions = []
+        self.compact = compact  # the reply (or exception) for a compaction request
+        self.beta = NS(messages=NS(stream=self._stream, create=self._create))
 
     def _stream(self, **params):
         # Snapshot messages: the agent keeps appending to the same list.
@@ -45,16 +47,23 @@ class FakeClient:
             raise item
         return FakeStream(item)
 
+    def _create(self, **params):
+        self.compactions.append({**params, "messages": list(params["messages"])})
+        reply = self.compact.pop(0) if isinstance(self.compact, list) else self.compact
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
 
-def make(script, approve=lambda n, i: False, **settings):
-    client = FakeClient(script)
+
+def make(script, approve=lambda n, i: False, compact=None, **settings):
+    client = FakeClient(script, compact)
     store = MemoryStore()
     agent = Jarvis(Settings(**settings), store=store, client=client, approve=approve)
     return agent, client, store
 
 
-def msg(content, stop_reason):
-    return NS(content=content, stop_reason=stop_reason, stop_details=None)
+def msg(content, stop_reason, usage=None):
+    return NS(content=content, stop_reason=stop_reason, stop_details=None, usage=usage)
 
 
 def test_plain_answer_and_request_shape():
@@ -175,3 +184,71 @@ def test_text_is_streamed_to_on_event():
     agent = Jarvis(Settings(), store=MemoryStore(), client=client, on_event=lambda k, d: seen.append((k, d)))
     assert agent.ask("hi").text == "안녕하세요"
     assert [d["text"] for k, d in seen if k == "text"] == ["안녕", "하세요"]
+
+
+SUMMARY = NS(type="compaction", content="요약: 사용자와 JARVIS 확장 계획을 논의함", signature="sig")
+COMPACTED = NS(stop_reason="compaction", content=[SUMMARY])
+
+
+def used(context_tokens):
+    """Usage of a response whose request read `context_tokens` (mostly from the prompt cache)."""
+    return NS(input_tokens=1_000, cache_read_input_tokens=context_tokens - 1_500,
+              cache_creation_input_tokens=0, output_tokens=500)
+
+
+def test_long_conversation_is_compacted_in_place_once_the_answer_is_out():
+    agent, client, _ = make(
+        [msg([text("긴 답")], "end_turn", used(90_000)), msg([text("이어서")], "end_turn")], compact=COMPACTED
+    )
+    history = agent.messages  # the web app keeps one list per chat and reuses it
+    assert agent.ask("계속").text == "긴 답" and client.compactions == []  # the answer is not held back
+    assert agent.compact_if_long() == "compacted a 90,000-token conversation"
+    request, turn = client.compactions[0], client.calls[0]
+    assert request["compaction"]["type"] == "summarize" and request["betas"] == [COMPACT_BETA]
+    assert "fallbacks" not in request and "format" not in request["output_config"]
+    for same in ("model", "system", "tools", "thinking", "output_config", "cache_control"):  # keeps the prompt cache
+        assert request[same] == turn[same], same
+    assert history is agent.messages and agent.messages == [{"role": "assistant", "content": [SUMMARY]}]
+    agent.ask("다음 질문")
+    after = client.calls[1]
+    assert COMPACT_BETA in after["betas"] and after["messages"][0]["content"] == [SUMMARY]
+    assert [m["role"] for m in after["messages"]] == ["assistant", "user"]
+
+
+def test_short_conversation_is_not_compacted():
+    agent, client, _ = make([msg([text("ok")], "end_turn", used(20_000))], compact=COMPACTED)
+    agent.ask("hi")
+    assert agent.compact_if_long() is None
+    assert client.compactions == [] and COMPACT_BETA not in client.calls[0]["betas"]
+
+
+@pytest.mark.parametrize("reply", [RuntimeError("overloaded"), NS(stop_reason="refusal", content=[])])
+def test_failed_compaction_keeps_the_conversation_and_waits_before_retrying(reply):
+    agent, client, _ = make(
+        [msg([text("긴 답")], "end_turn", used(90_000)), msg([text("또")], "end_turn", used(100_000)),
+         msg([text("또또")], "end_turn", used(112_000))],
+        compact=reply,
+    )
+    agent.ask("계속")
+    assert agent.compact_if_long().startswith("compaction failed") and len(agent.messages) == 2
+    agent.ask("계속")
+    assert agent.compact_if_long() is None and len(client.compactions) == 1  # not again 10k tokens later
+    agent.ask("계속")
+    assert agent.compact_if_long().startswith("compaction failed") and len(client.compactions) == 2
+
+
+def test_compaction_can_be_turned_off():
+    agent, client, _ = make([msg([text("ok")], "end_turn", used(500_000))], compact=COMPACTED, compact_at_tokens=0)
+    agent.ask("hi")
+    assert agent.compact_if_long() is None and client.compactions == []
+
+
+def test_a_successful_compaction_clears_the_wait_left_by_a_failed_one():
+    turns = [msg([text(str(t))], "end_turn", used(t)) for t in (90_000, 110_000, 95_000)]
+    agent, client, _ = make(turns, compact=[RuntimeError("overloaded"), COMPACTED, COMPACTED])
+    agent.ask("1")
+    assert agent.compact_if_long().startswith("compaction failed")  # retry waits until 110,000 tokens
+    agent.ask("2")
+    assert agent.compact_if_long().startswith("compacted")
+    agent.ask("3")  # the summarized conversation grew past the limit again
+    assert agent.compact_if_long().startswith("compacted") and len(client.compactions) == 3
