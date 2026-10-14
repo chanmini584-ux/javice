@@ -2,10 +2,16 @@
 
 Polite by default: identifies itself, obeys robots.txt for article pages, waits
 between requests to the same host, caps download size, and skips what it already has.
+
+Safe by default: feed items link wherever their authors like, so only http(s) URLs
+that resolve to public internet addresses are fetched, redirects included. A feed
+cannot make JARVIS read local files or probe the home network (router, other PCs).
 """
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 import time
 import urllib.request
 import urllib.robotparser
@@ -22,13 +28,76 @@ from .store import KnowledgeBase
 
 USER_AGENT = "JARVIS-personal-collector/0.1 (+personal use; respects robots.txt)"
 MAX_BYTES = 2_000_000
+WEB_SCHEMES = ("http", "https")
 
 Fetch = Callable[[str], bytes]
+Resolve = Callable[[str, int], list[str]]
+
+
+class UnsafeURLError(ValueError):
+    """The URL is not http(s) or points at this machine or a private network."""
+
+
+def _resolve(host: str, port: int) -> list[str]:
+    return [info[4][0] for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
+
+
+def _is_public(ip: str) -> bool:
+    addr = ipaddress.ip_address(ip.split("%", 1)[0])  # drop an IPv6 zone id
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return addr.is_global and not addr.is_multicast
+
+
+def check_url(url: str, resolve: Resolve = _resolve) -> None:
+    """Raise UnsafeURLError unless url is http(s) and its host resolves only to public addresses."""
+    parts = urlparse(url)
+    if parts.scheme not in WEB_SCHEMES or not parts.hostname:
+        raise UnsafeURLError(f"only http(s) URLs are fetched: {url!r}")
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError as exc:
+        raise UnsafeURLError(f"bad port in {url!r}") from exc
+    for ip in resolve(parts.hostname, port):
+        if not _is_public(ip):
+            raise UnsafeURLError(f"{parts.hostname} points to a non-public address ({ip})")
+
+
+class _PublicOnly(urllib.request.BaseHandler):
+    """Checks every request, including each redirect hop, before anything is sent."""
+
+    def __init__(self, resolve: Resolve) -> None:
+        self.resolve = resolve
+
+    def http_request(self, req: urllib.request.Request) -> urllib.request.Request:
+        check_url(req.full_url, self.resolve)
+        return req
+
+    https_request = http_request
+
+    def unknown_open(self, req: urllib.request.Request) -> None:
+        raise UnsafeURLError(f"only http(s) URLs are fetched: {req.full_url!r}")
+
+
+def public_opener(resolve: Resolve = _resolve) -> urllib.request.OpenerDirector:
+    """An opener that speaks only http(s) to public hosts (no file:, ftp: or data: handlers)."""
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        _PublicOnly(resolve),
+        urllib.request.ProxyHandler(),
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPRedirectHandler(),
+        urllib.request.HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    return opener
 
 
 def http_fetch(url: str, timeout: float = 20.0) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with public_opener().open(req, timeout=timeout) as resp:
         return resp.read(MAX_BYTES)
 
 
@@ -156,9 +225,12 @@ class CollectReport:
     seen: int = 0
     failed_sources: list[str] = field(default_factory=list)
     blocked_by_robots: int = 0
+    unsafe: int = 0  # links refused by check_url: not http(s), or pointing at a private network
 
     def summary(self) -> str:
         s = f"new {self.new}, already had {self.seen}, robots-blocked {self.blocked_by_robots}"
+        if self.unsafe:
+            s += f", unsafe {self.unsafe}"
         if self.failed_sources:
             s += f", failed sources: {', '.join(self.failed_sources)}"
         return s
@@ -214,6 +286,9 @@ class Collector:
                 log(f"{src.name}: {exc}")
                 continue
             for item in items:
+                if urlparse(item.link).scheme not in WEB_SCHEMES:
+                    report.unsafe += 1  # file:, ftp:, javascript:… never fetched, never stored
+                    continue
                 if self.kb.has(item.link):
                     report.seen += 1
                     continue
@@ -223,6 +298,9 @@ class Collector:
                         try:
                             html = self._polite_fetch(item.link).decode("utf-8", "replace")
                             text = extract_article(html, item.link) or text
+                        except UnsafeURLError as exc:  # keep the feed summary only
+                            report.unsafe += 1
+                            log(f"{item.link}: {exc}")
                         except Exception as exc:
                             log(f"{item.link}: {exc}")
                     else:

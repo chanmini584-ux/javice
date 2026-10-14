@@ -1,13 +1,22 @@
 """Knowledge base and collector tests with canned feeds (no network)."""
 
+import email
+import io
+import threading
+import urllib.request
+import urllib.response
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace as NS
+
+import pytest
 
 from jarvis.agent import Jarvis
 from jarvis.briefing import briefing_prompt
 from jarvis.config import Settings
 from jarvis.daemon import LAST_COLLECT_KEY, Daemon
 from jarvis.knowledge import Collector, KnowledgeBase, Source, load_sources, parse_feed
+from jarvis.knowledge.collector import UnsafeURLError, check_url, http_fetch, public_opener
 from jarvis.memory import MemoryStore
 
 T0 = datetime(2026, 10, 11, 6, 0, tzinfo=timezone.utc)
@@ -83,6 +92,99 @@ def test_collect_obeys_robots_dedupes_and_reports_failures():
     assert blocked.text == "teaser"  # kept the feed summary, never fetched the page
     again = Collector(kb, fetch=fake_fetch, min_interval_s=0).collect(sources)
     assert again.new == 0 and again.seen == 4
+
+
+def test_collector_never_fetches_or_stores_non_http_links():
+    feed = b"""<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>looks harmless</title><link>file:///home/me/.jarvis/secrets.env</link><description>x</description></item>
+<item><title>Rust 2026</title><link>https://example.com/rust</link><description>teaser</description></item>
+</channel></rss>"""
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        return fake_fetch(url) if url != "https://feeds/evil" else feed
+
+    kb = KnowledgeBase()
+    report = Collector(kb, fetch=fetch, min_interval_s=0).collect(
+        [Source("evil", "https://feeds/evil", "it", fetch_full_text=True)]
+    )
+    assert [u for u in fetched if not u.startswith("https://")] == []
+    assert not kb.has("file:///home/me/.jarvis/secrets.env") and kb.has("https://example.com/rust")
+    assert report.unsafe == 1 and "unsafe 1" in report.summary()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "ftp://example.com/feed",
+        "http://127.0.0.1:8765/api/chats",
+        "http://127.1/",
+        "http://2130706433/",  # 127.0.0.1 written as one number
+        "http://localhost:8765/",
+        "http://[::1]/",
+        "http://0.0.0.0/",
+        "http://10.0.0.5/",
+        "http://192.168.0.1/admin",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://user@192.168.0.1/",
+    ],
+)
+def test_check_url_refuses_local_and_private_targets(url):
+    with pytest.raises(UnsafeURLError):
+        check_url(url)
+
+
+def test_check_url_refuses_names_that_resolve_to_the_home_network():
+    with pytest.raises(UnsafeURLError):
+        check_url("http://my-router.example/", resolve=lambda host, port: ["93.184.216.34", "192.168.0.1"])
+    check_url("https://example.com/post", resolve=lambda host, port: ["93.184.216.34"])  # public: allowed
+
+
+def test_http_fetch_never_contacts_a_local_server():
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ANTHROPIC_API_KEY=secret")
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(UnsafeURLError):
+            http_fetch(f"http://127.0.0.1:{server.server_port}/secret")
+        assert hits == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_redirect_into_the_home_network_is_not_followed():
+    asked = []
+
+    class FakeWeb(urllib.request.BaseHandler):
+        handler_order = 100  # answers before the real HTTP handler
+
+        def http_open(self, req):
+            asked.append(req.full_url)
+            headers = email.message_from_string("Location: http://router.test/admin\n\n")
+            resp = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url, 302)
+            resp.msg = "Found"
+            return resp
+
+    hosts = {"public.test": ["93.184.216.34"], "router.test": ["192.168.0.1"]}
+    opener = public_opener(resolve=lambda host, port: hosts[host])
+    opener.add_handler(FakeWeb())
+    with pytest.raises(UnsafeURLError):
+        opener.open("http://public.test/post")
+    assert asked == ["http://public.test/post"]
 
 
 def test_search_korean_english_short_terms_and_topic_filter():
