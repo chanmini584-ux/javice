@@ -9,7 +9,10 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
-    model: str = "claude-opus-5-5"
+    model: str = "claude-opus-5-5"  # conversation, voice commands, briefing
+    # Background jobs run on smaller models; an empty value means "use `model`".
+    memo_model: str = "claude-haiku-5-5"  # memo judgment: classification and extraction, often
+    reflect_model: str = "claude-sonnet-5-5"  # proactive thinking: judgment, a few times a day
     # Opus 5.5 defaults to "medium"; planning/judgment work benefits from more depth.
     effort: str = "high"
     max_tokens: int = 64000
@@ -54,6 +57,8 @@ class Settings:
         env = os.environ
         return cls(
             model=env.get("JARVIS_MODEL", cls.model),
+            memo_model=env.get("JARVIS_MEMO_MODEL", cls.memo_model),
+            reflect_model=env.get("JARVIS_REFLECT_MODEL", cls.reflect_model),
             effort=env.get("JARVIS_EFFORT", cls.effort),
             max_tokens=int(env.get("JARVIS_MAX_TOKENS", cls.max_tokens)),
             max_steps=int(env.get("JARVIS_MAX_STEPS", cls.max_steps)),

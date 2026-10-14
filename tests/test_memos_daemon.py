@@ -94,6 +94,20 @@ def test_consolidator_applies_decisions():
     assert "<memos>" in client.params["messages"][0]["content"]
 
 
+def test_memo_judgment_runs_on_the_memo_model():
+    # Consolidation runs up to every 15 minutes in always-on mode: a small model keeps it cheap.
+    store = MemoryStore()
+    store.add_memo("우유 사기", now=T0)
+    empty = {"memos": [], "new_goals": [], "step_updates": []}
+    client = FakeClient(empty)
+    Consolidator(client, store, Settings()).run(now=T0)
+    assert client.params["model"] == "claude-haiku-5-5"
+    store.add_memo("세탁소 들르기", now=T0)
+    client = FakeClient(empty)
+    Consolidator(client, store, Settings(memo_model="")).run(now=T0)
+    assert client.params["model"] == "claude-opus-5-5"  # empty: use the main model
+
+
 def test_consolidator_skips_repeated_goals_and_keeps_goals_with_vague_deadlines():
     store = MemoryStore()
     store.add_goal("영어 공부", "이직")
