@@ -1,0 +1,29 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "JARVIS-style personal AI agent built on the Claude API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["anthropic>=1.13", "numpy>=1.26"]
+
+[project.optional-dependencies]
+voice = ["sounddevice>=0.4", "faster-whisper>=1.0", "speechbrain>=1.0", "torch>=2.1", "pyttsx3>=2.90"]
+web = ["fastapi>=0.110", "uvicorn>=0.29"]
+vision = ["opencv-python>=4.8", "ultralytics>=8.3"]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+jarvis = "jarvis.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["jarvis*"]
+
+[tool.setuptools.package-data]
+"jarvis.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
