@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal
 
 Risk = Literal["safe", "confirm"]
 Handler = Callable[..., Any]
+RiskFn = Callable[[dict[str, Any]], Risk]
 
 
 @dataclass
@@ -23,6 +24,17 @@ class Tool:
     input_schema: dict[str, Any]
     handler: Handler
     risk: Risk = "safe"
+    # Decides per call (e.g. opening a known app is safe, an unknown one is not).
+    risk_fn: RiskFn | None = None
+    audited: bool = False  # actions on the PC are written to the action log
+
+    def risk_for(self, tool_input: dict[str, Any]) -> Risk:
+        if self.risk_fn is None:
+            return self.risk
+        try:
+            return self.risk_fn(tool_input)
+        except Exception:  # cannot judge the call, so do not let it through unasked
+            return "confirm"
 
     def definition(self) -> dict[str, Any]:
         return {"name": self.name, "description": self.description, "input_schema": self.input_schema}
@@ -62,6 +74,8 @@ class ToolRegistry:
         properties: dict[str, Any],
         required: list[str] | None = None,
         risk: Risk = "safe",
+        risk_fn: RiskFn | None = None,
+        audited: bool = False,
     ) -> Callable[[Handler], Handler]:
         """Decorator form of :meth:`register`."""
 
@@ -72,7 +86,7 @@ class ToolRegistry:
                 "required": required if required is not None else list(properties),
                 "additionalProperties": False,
             }
-            self.register(Tool(name, description, schema, fn, risk))
+            self.register(Tool(name, description, schema, fn, risk, risk_fn, audited))
             return fn
 
         return wrap
