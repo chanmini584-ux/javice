@@ -3,7 +3,6 @@
 import ast
 import re
 import struct
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -16,6 +15,7 @@ PKG = ROOT / "packaging"
 
 
 def pyproject():
+    tomllib = pytest.importorskip("tomllib")  # Python 3.11+; the project also supports 3.10
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 

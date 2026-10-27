@@ -6,6 +6,8 @@ the morning briefing, daily collection and memo upkeep; voice is optional on top
 
 from __future__ import annotations
 
+import socket
+import sys
 import threading
 import time
 from typing import Any, Callable
@@ -14,6 +16,25 @@ from ..config import Settings
 
 StateFn = Callable[[str, "str | None"], None]
 _DEFAULT = object()
+
+
+def ensure_port_free(host: str, port: int) -> None:
+    """Fail clearly when something else already listens on the port.
+
+    uvicorn sets SO_REUSEADDR, which on Windows lets a second program bind a port that is in
+    use, so the clash would go unnoticed. Probing exclusively catches it on both systems.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        if sys.platform == "win32":
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)  # type: ignore[attr-defined]
+        else:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError as exc:
+            raise RuntimeError(
+                f"포트 {port}을(를) 다른 프로그램이 쓰고 있습니다. 그 프로그램을 끄거나 --port로 다른 번호를 지정하세요."
+            ) from exc
 
 
 class DaemonRunner:
@@ -132,6 +153,7 @@ class ServerHandle:
 
         from ..web.server import create_app
 
+        ensure_port_free(self.host, self.port)
         app = create_app(self._build, self.token, proactive=self.web_does_reflections)
         # log_config=None: uvicorn's default logging needs a console (stdout is None in a windowed exe).
         self._server = uvicorn.Server(uvicorn.Config(app, host=self.host, port=self.port, log_level="warning", log_config=None))

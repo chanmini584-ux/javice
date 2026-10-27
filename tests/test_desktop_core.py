@@ -297,3 +297,23 @@ def test_web_server_takes_over_reflections_only_when_no_assistant_runs(tmp_path)
     assert h.web_does_reflections() is False
     runner.stop()
     assert h.web_does_reflections() is True
+
+
+def test_ensure_port_free_probe():
+    from jarvis.desktop.server import ensure_port_free
+
+    ensure_port_free("127.0.0.1", free_port())  # free: fine
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        with pytest.raises(RuntimeError, match="다른 프로그램"):
+            ensure_port_free("127.0.0.1", busy.getsockname()[1])
+
+
+def test_restart_right_after_stop_does_not_look_like_a_port_clash(tmp_path):
+    port = free_port()
+    for _ in range(2):
+        h = ServerHandle(Settings(data_dir=tmp_path), port=port, build=lambda: QuietJarvis(tmp_path), daemon_factory=None)
+        h.start()
+        assert health(port) == {"status": "ok"}
+        h.stop()
