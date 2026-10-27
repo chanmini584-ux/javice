@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -26,10 +27,12 @@ from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from ..agent import Jarvis
 from ..memory import ScheduleItem
+from ..pc.store import clip_value
+from ..pc.tools import describe_action
 
 log = logging.getLogger("jarvis.web")
 STATIC = resources.files("jarvis.web") / "static"
@@ -81,7 +84,57 @@ class ScheduleUpdate(BaseModel):
     status: str | None = None
 
 
+class PcSettingsIn(BaseModel):
+    enabled: StrictBool | None = None
+    roots: list[str] | None = None
+    apps: dict[str, str] | None = None
+
+
+class ApprovalIn(BaseModel):
+    allow: StrictBool
+
+
 Emit = Callable[[str, dict[str, Any]], None]
+
+
+class ApprovalBroker:
+    """Asks the owner (in the open app) before a risky action, and waits for the answer.
+
+    The worker thread blocks in :meth:`request`; the answer arrives on another thread via
+    :meth:`answer`. No answer in time counts as "no".
+    """
+
+    def __init__(self, timeout: float = 120.0) -> None:
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._pending: dict[str, dict[str, Any]] = {}
+
+    def request(self, tool: str, tool_input: dict[str, Any], emit: Emit | None) -> bool:
+        item = {"id": secrets.token_urlsafe(9), "tool": tool, "input": clip_value(tool_input), "summary": describe_action(tool, tool_input)}
+        slot = {"item": item, "event": threading.Event(), "allow": False}
+        with self._lock:
+            self._pending[item["id"]] = slot
+        try:
+            if emit:
+                emit("approval", item)
+            slot["event"].wait(self.timeout)
+            return bool(slot["allow"]) if slot["event"].is_set() else False
+        finally:
+            with self._lock:
+                self._pending.pop(item["id"], None)
+
+    def answer(self, approval_id: str, allow: bool) -> bool:
+        with self._lock:
+            slot = self._pending.pop(approval_id, None)
+        if slot is None:
+            return False
+        slot["allow"] = allow
+        slot["event"].set()
+        return True
+
+    def pending(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [s["item"] for s in self._pending.values()]
 
 
 class Worker:
@@ -92,7 +145,14 @@ class Worker:
     most recent conversations; an older one is resumed from its transcript.
     """
 
-    def __init__(self, build: Callable[[], Jarvis], proactive: Callable[[], bool] = lambda: False) -> None:
+    def __init__(
+        self,
+        build: Callable[[], Jarvis],
+        proactive: Callable[[], bool] = lambda: False,
+        approval_timeout: float = 120.0,
+    ) -> None:
+        self.approvals = ApprovalBroker(approval_timeout)
+        self._emit: Emit | None = None
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-web")
         self._jarvis: Jarvis | None = None
         self._build = build
@@ -104,7 +164,11 @@ class Worker:
     def jarvis(self) -> Jarvis:
         if self._jarvis is None:  # created lazily, on the worker thread
             self._jarvis = self._build()
+            self._jarvis.approve = self._approve  # risky actions are asked in the app
         return self._jarvis
+
+    def _approve(self, tool: str, tool_input: dict[str, Any]) -> bool:
+        return self.approvals.request(tool, tool_input, self._emit)
 
     async def run(self, fn: Callable[[], Any]) -> Any:
         return await asyncio.get_running_loop().run_in_executor(self._pool, fn)
@@ -143,10 +207,12 @@ class Worker:
                 emit("tool", {"name": data["name"]})  # names only: outputs can be large or private
 
         j.on_event = forward
+        self._emit = emit
         try:
             result = j.ask(message)
         finally:
             j.on_event = previous
+            self._emit = None
         store.add_chat_turn(chat_id, message, result.text, result.tool_calls)
         reply = {"chat_id": chat_id, "text": result.text, "stop_reason": result.stop_reason, "tools": result.tool_calls}
         if emit:
@@ -212,10 +278,16 @@ def _sse(kind: str, data: dict[str, Any]) -> str:
     return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def create_app(build: Callable[[], Jarvis], token: str, proactive: bool | Callable[[], bool] = False) -> FastAPI:
+def create_app(
+    build: Callable[[], Jarvis],
+    token: str,
+    proactive: bool | Callable[[], bool] = False,
+    approval_timeout: float = 120.0,
+) -> FastAPI:
     """proactive: run scheduled reflections here. A callable is asked every minute, so the
-    web server takes over whenever the always-on daemon is not running."""
-    worker = Worker(build, proactive if callable(proactive) else (lambda: proactive))
+    web server takes over whenever the always-on daemon is not running.
+    approval_timeout: seconds the owner has to answer a "may I?" prompt before it counts as no."""
+    worker = Worker(build, proactive if callable(proactive) else (lambda: proactive), approval_timeout)
 
     async def reflection_loop() -> None:
         while True:
@@ -348,6 +420,36 @@ def create_app(build: Callable[[], Jarvis], token: str, proactive: bool | Callab
             return await worker.run(lambda: worker.reflector.run())
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}") from e
+
+    # --- PC control: the switch, the action log, and "may I?" answers ---------------
+
+    @app.get("/api/pc/settings", dependencies=[Depends(auth)])
+    async def pc_settings() -> dict[str, Any]:
+        return await worker.run(lambda: worker.jarvis.pc.settings.load().to_dict())
+
+    @app.put("/api/pc/settings", dependencies=[Depends(auth)])
+    async def update_pc_settings(body: PcSettingsIn) -> dict[str, Any]:
+        def update() -> dict[str, Any]:
+            return worker.jarvis.pc.settings.update(**body.model_dump(exclude_none=True)).to_dict()
+
+        try:
+            return await worker.run(update)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+    @app.get("/api/pc/log", dependencies=[Depends(auth)])
+    async def pc_log(limit: int = 100) -> list[dict[str, Any]]:
+        return await worker.run(lambda: worker.jarvis.pc.audit.tail(max(1, min(limit, 500))))
+
+    @app.get("/api/approvals", dependencies=[Depends(auth)])
+    async def approvals() -> list[dict[str, Any]]:
+        return worker.approvals.pending()  # not via the worker: it is busy waiting for the answer
+
+    @app.post("/api/approvals/{approval_id}", dependencies=[Depends(auth)])
+    async def answer_approval(approval_id: str, body: ApprovalIn) -> dict[str, bool]:
+        if not worker.approvals.answer(approval_id, body.allow):
+            raise HTTPException(status_code=404, detail="no such pending approval")
+        return {"ok": True}
 
     @app.get("/api/overview", dependencies=[Depends(auth)])
     async def overview() -> dict[str, Any]:

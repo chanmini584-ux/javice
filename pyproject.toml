@@ -10,10 +10,14 @@ dependencies = ["anthropic>=1.13", "numpy>=1.26"]
 voice = ["sounddevice>=0.4", "faster-whisper>=1.0", "speechbrain>=1.0", "torch>=2.1", "pyttsx3>=2.90"]
 web = ["fastapi>=0.110", "uvicorn>=0.29"]
 vision = ["opencv-python>=4.8", "ultralytics>=8.3"]
+desktop = ["pystray>=0.19", "pillow>=10"]
 dev = ["pytest>=8", "httpx>=0.27"]
 
 [project.scripts]
 jarvis = "jarvis.cli:main"
+
+[project.gui-scripts]
+jarvis-desktop = "jarvis.desktop.app:entry"
 
 [build-system]
 requires = ["setuptools>=68"]

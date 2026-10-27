@@ -9,6 +9,7 @@ import anthropic
 
 from .config import Settings
 from .memory import MemoryStore
+from .pc.tools import PcControl, register_pc_tools
 from .prompts import SYSTEM_PROMPT, situation_block
 from .tools import ToolRegistry, register_builtin_tools
 
@@ -72,6 +73,9 @@ class Jarvis:
         self.on_event = on_event
         self.registry = ToolRegistry()
         register_builtin_tools(self.registry, self.store)
+        self.pc = PcControl(self.settings.data_dir)
+        self.pc_audit = self.pc.audit
+        register_pc_tools(self.registry, self.pc)
         self.eyes = eyes
         if eyes is not None:
             eyes.register_tools(self.registry)
@@ -190,12 +194,19 @@ class Jarvis:
             calls.append(block.name)
             tool_input = dict(block.input or {})
             tool = self.registry.get(block.name)
+            needs_ok = bool(tool) and tool.risk_for(tool_input) == "confirm"
+            declined = False
             if readonly and block.name not in READ_ONLY_TOOLS:
                 output, is_error = "Not available in an unattended run: only reading tools are allowed.", True
-            elif tool and tool.risk == "confirm" and not self.approve(block.name, tool_input):
+            elif needs_ok and not self.approve(block.name, tool_input):
                 output, is_error = "The user declined this action. Do not retry it; ask or adapt.", True
+                declined = True
             else:
                 output, is_error = self.registry.execute(block.name, tool_input)
+            if tool and tool.audited:
+                outcome = "declined" if declined else "error" if is_error else "ok"
+                detail = output if is_error and isinstance(output, str) else ""
+                self.pc_audit.record(block.name, tool_input, outcome, confirmed=needs_ok, detail=detail)
             self.on_event("tool", {"name": block.name, "input": tool_input, "output": output, "is_error": is_error})
             results.append(
                 {"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error}
