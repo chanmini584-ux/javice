@@ -8,6 +8,7 @@ every action is written to the action log by the agent loop.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -36,6 +37,24 @@ DEFAULT_APPS = {
     "vscode": "code", "vs code": "code", "visual studio code": "code",
 }
 APP_NAME = re.compile(r"^[\w .+\-]{1,60}$")  # a plain name: no path, no shell characters
+
+
+def describe_action(tool: str, tool_input: dict[str, Any]) -> str:
+    """One plain sentence for the approval prompt: what is about to happen."""
+    try:
+        if tool == "pc_delete_files":
+            names = [re.split(r"[\\/]", str(p))[-1] for p in tool_input["paths"]]
+            more = f" 외 {len(names) - 3}개" if len(names) > 3 else ""
+            return f"파일 {len(names)}개를 삭제합니다 (복구할 수 있는 휴지통 폴더로 옮김): {', '.join(names[:3])}{more}"
+        if tool == "pc_open_app":
+            return f"알 수 없는 프로그램 '{tool_input['name']}'을(를) 실행합니다."
+        if tool == "pc_open_url":
+            return f"결제·로그인·계정과 관련될 수 있는 페이지를 엽니다: {tool_input['url']}"
+        if tool == "run_python":
+            return "파이썬 코드를 실행합니다:\n" + str(tool_input["code"])[:400]
+    except Exception:  # odd input: fall through to the generic line
+        pass
+    return f"{tool} 실행 요청: {json.dumps(tool_input, ensure_ascii=False, default=str)[:300]}"
 
 
 def _default_launcher(command: str) -> None:

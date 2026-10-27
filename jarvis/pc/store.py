@@ -65,21 +65,21 @@ class PcSettingsStore:
         cfg = self.load()
         if enabled is not None:
             if not isinstance(enabled, bool):
-                raise ValueError("enabled must be true or false")
+                raise ValueError("enabled는 true 또는 false여야 합니다")
             cfg.enabled = enabled
         if roots is not None:
             if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
-                raise ValueError("roots must be a list of folder paths")
+                raise ValueError("허용 폴더 목록 형식이 올바르지 않습니다")
             seen: list[str] = []
             for r in roots:
                 if r.strip() and _norm(r.strip()) not in seen:
                     seen.append(_norm(r.strip()))
             if not seen:
-                raise ValueError("at least one folder is required")
+                raise ValueError("허용할 폴더를 하나 이상 입력하세요")
             cfg.roots = seen
         if apps is not None:
             if not isinstance(apps, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in apps.items()):
-                raise ValueError("apps must map names to commands")
+                raise ValueError("프로그램 목록 형식이 올바르지 않습니다")
             cfg.apps = {k.strip().lower(): v.strip() for k, v in apps.items() if k.strip() and v.strip()}
         self._save(cfg)
         return cfg
@@ -91,14 +91,14 @@ class PcSettingsStore:
         os.replace(tmp, self.path)
 
 
-def _clip(value: Any) -> Any:
+def clip_value(value: Any) -> Any:
     """Shrink a tool input for the log: long strings and lists are cut."""
     if isinstance(value, str):
         return value if len(value) <= 200 else value[:200] + "…"
     if isinstance(value, (list, tuple)):
-        return [_clip(v) for v in value[:20]]
+        return [clip_value(v) for v in value[:20]]
     if isinstance(value, dict):
-        return {str(k): _clip(v) for k, v in list(value.items())[:20]}
+        return {str(k): clip_value(v) for k, v in list(value.items())[:20]}
     return value
 
 
@@ -118,7 +118,7 @@ class AuditLog:
         row = {
             "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
             "tool": tool,
-            "input": _clip(tool_input),
+            "input": clip_value(tool_input),
             "outcome": outcome,  # ok | error | declined
             "confirmed": confirmed,
         }

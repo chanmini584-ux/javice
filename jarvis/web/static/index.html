@@ -151,6 +151,26 @@
   .prio { font-size: 12px; border-radius: 999px; padding: 0 8px; border: 1px solid var(--line); color: var(--muted); }
   .prio.p3 { color: var(--err); border-color: var(--err); }
   .prio.p2 { color: var(--accent); border-color: var(--accent); }
+  .switchrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .switch { position: relative; width: 46px; height: 26px; flex: none; }
+  .switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+  .switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--line); transition: background .15s; }
+  .switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .switch input:checked + span { background: var(--accent); }
+  .switch input:checked + span::after { transform: translateX(20px); }
+  .switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .pc textarea { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; font-size: 14px; resize: vertical; }
+  .rules { margin: 6px 0 0; padding-left: 20px; }
+  .rules li { margin: 4px 0; }
+  .logrow { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  .logrow .logwhat { word-break: break-all; }
+  .logrow .declined, .logrow .error { color: var(--err); }
+  #approval { position: fixed; inset: 0; z-index: 40; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.55); padding: 16px; }
+  #approval.open { display: flex; }
+  #approval .box { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; max-width: 460px; width: 100%; }
+  #approval pre { white-space: pre-wrap; word-break: break-word; background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 10px 0; max-height: 40vh; overflow: auto; font: inherit; font-size: 14px; }
+  #approval .btns { display: flex; gap: 10px; justify-content: flex-end; }
+  #approval .deny { background: none; border: 1px solid var(--line); border-radius: 10px; padding: 8px 16px; }
   .scrim { display: none; }
   @media (max-width: 820px) {
     aside { position: fixed; inset: 0 auto 0 0; z-index: 20; transform: translateX(-100%); transition: transform .2s; }
@@ -172,10 +192,19 @@
     <button data-view="schedule">📅 일정</button>
     <button data-view="goals">🎯 목표와 계획</button>
     <button data-view="memos">📝 메모</button>
+    <button data-view="pc">🖥️ PC 제어</button>
   </div>
 </aside>
 <div class="scrim" id="scrim"></div>
 <div id="toasts" aria-live="polite"></div>
+<div id="approval" role="alertdialog" aria-modal="true" aria-labelledby="apTitle" aria-describedby="apText">
+  <div class="box">
+    <h3 id="apTitle" style="margin:0 0 4px">확인이 필요합니다</h3>
+    <p class="muted" style="margin:0">되돌리기 어려운 작업이라 실행 전에 먼저 물어봅니다.</p>
+    <pre id="apText"></pre>
+    <div class="btns"><button class="deny" id="apNo">거절</button><button class="primary" id="apYes" style="margin:0">허용</button></div>
+  </div>
+</div>
 <div class="main">
   <header class="top">
     <button class="iconbtn" id="menu" aria-label="대화 목록">☰</button>
@@ -209,6 +238,35 @@
     </section>
     <section id="goals" class="view"></section>
     <section id="memos" class="view"></section>
+    <section id="pc" class="view pc">
+      <h2>PC 제어</h2>
+      <p class="muted">자비스가 이 PC에서 파일 정리, 프로그램 실행, 검색 같은 일을 대신 하게 합니다. 켜져 있는 동안만 동작합니다.</p>
+      <div class="card switchrow">
+        <div><h3 style="margin:0">PC 제어 허용</h3><span class="muted" id="pcState">불러오는 중…</span></div>
+        <label class="switch"><input type="checkbox" id="pcEnabled" aria-label="PC 제어 허용"><span></span></label>
+      </div>
+      <div class="card">
+        <h3>어떻게 동작하나요</h3>
+        <ul class="rules muted">
+          <li><b>바로 실행</b>: 파일 정리·검색, 알려진 프로그램 열기, 일반 웹 페이지 열기, 일정 관리</li>
+          <li><b>실행 전에 한 번 확인</b>: 파일 삭제, 처음 보는 프로그램 실행, 결제·로그인·계정·비밀번호 관련 페이지</li>
+          <li>삭제는 휴지통 폴더로 옮기고, 파일 정리는 “정리한 거 되돌려 줘”로 취소할 수 있습니다. 비밀번호·인증서 같은 민감한 파일은 건드리지 않습니다.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>허용할 폴더</h3>
+        <p class="muted">한 줄에 폴더 하나. 이 밖의 폴더는 읽거나 옮길 수 없습니다.</p>
+        <textarea id="pcRoots" rows="5" spellcheck="false"></textarea>
+        <h3 style="margin-top:12px">바로 열 프로그램 추가</h3>
+        <p class="muted">한 줄에 하나, 이름=실행파일 (예: 한글=hwp.exe)</p>
+        <textarea id="pcApps" rows="3" spellcheck="false"></textarea>
+        <button class="primary" id="pcSave">저장</button> <span class="muted" id="pcMsg" role="status"></span>
+      </div>
+      <div class="card">
+        <div class="banner"><h3 style="margin:0">실행 기록</h3><button class="toggle" id="pcLogRefresh">새로고침</button></div>
+        <div id="pcLog" class="muted">…</div>
+      </div>
+    </section>
     <section id="login" class="view">
       <div class="card">
         <h3>접속 토큰</h3>
@@ -327,6 +385,7 @@ function show(view) {
   if (view === "goals" || view === "memos") { $("title").textContent = view === "goals" ? "목표와 계획" : "메모"; loadOverview(); }
   if (view === "schedule") { $("title").textContent = "일정"; loadSchedule(); }
   if (view === "notices") { $("title").textContent = "자비스 알림"; loadNotices(true); }
+  if (view === "pc") { $("title").textContent = "PC 제어"; loadPc(); }
   if (view === "chat") renderList();
 }
 document.querySelectorAll(".links button").forEach(b => b.onclick = () => show(b.dataset.view));
@@ -485,8 +544,9 @@ async function send() {
         if (kind === "chat") { if (chatId !== data.chat_id) { chatId = data.chat_id; store.set("jarvis.chat", String(chatId)); } }
         else if (kind === "text") { got = true; a.append(data.text); }
         else if (kind === "tool") { a.tool(data.name); if (!got) a.typing(); }
-        else if (kind === "done") { a.finish(data.text); say(data.text); finished = true; }
-        else if (kind === "error") { a.fail("오류: " + data.message); finished = true; }
+        else if (kind === "approval") askApproval(data);
+        else if (kind === "done") { clearApprovals(); a.finish(data.text); say(data.text); finished = true; }
+        else if (kind === "error") { clearApprovals(); a.fail("오류: " + data.message); finished = true; }
         if (stick) toBottom();
       }
     }
@@ -671,6 +731,83 @@ async function loadOverview() {
     }
   } catch { /* login view already shown on 401 */ }
 }
+
+// ---------- PC control (server text only ever goes in through textContent) ----------
+const apQueue = [];
+function askApproval(item) { apQueue.push(item); if (!$("approval").classList.contains("open")) showApproval(); }
+function showApproval() {
+  const item = apQueue[0];
+  if (!item) { $("approval").classList.remove("open"); return; }
+  $("apText").textContent = item.summary;
+  $("approval").classList.add("open");
+  $("apNo").focus(); // the safe answer is the default
+}
+function clearApprovals() { apQueue.length = 0; $("approval").classList.remove("open"); }
+async function answerApproval(allow) {
+  const item = apQueue.shift();
+  showApproval();
+  if (!item) return;
+  try { await fetch("/api/approvals/" + encodeURIComponent(item.id), { method: "POST", headers: headers(true), body: JSON.stringify({ allow }) }); }
+  catch { toast("답을 보내지 못했습니다", "연결을 확인하세요. 답이 없으면 거절로 처리됩니다."); }
+}
+$("apYes").onclick = () => answerApproval(true);
+$("apNo").onclick = () => answerApproval(false);
+document.addEventListener("keydown", e => {
+  if (!$("approval").classList.contains("open")) return;
+  if (e.key === "Escape") { e.preventDefault(); answerApproval(false); }
+  if (e.key === "Tab") { e.preventDefault(); (document.activeElement === $("apNo") ? $("apYes") : $("apNo")).focus(); }
+});
+
+async function pcApi(body) {
+  const res = await fetch("/api/pc/settings", { method: body ? "PUT" : "GET", headers: headers(!!body), body: body ? JSON.stringify(body) : undefined });
+  if (res.status === 401) { show("login"); throw new Error("토큰이 맞지 않습니다"); }
+  if (!res.ok) {
+    let detail = ""; try { detail = (await res.json()).detail; } catch {}
+    throw new Error(typeof detail === "string" && detail ? detail : "저장하지 못했습니다 (" + res.status + ")");
+  }
+  return res.json();
+}
+function renderPc(cfg) {
+  $("pcEnabled").checked = cfg.enabled;
+  $("pcState").textContent = cfg.enabled ? "켜짐 — 자비스가 아래 규칙대로 PC를 다룹니다" : "꺼짐 — 자비스는 PC를 건드리지 않습니다";
+  $("pcRoots").value = cfg.roots.join("\n");
+  $("pcApps").value = Object.entries(cfg.apps).map(([k, v]) => k + "=" + v).join("\n");
+}
+async function loadPc() { try { renderPc(await pcApi()); loadPcLog(); } catch (e) { $("pcState").textContent = e.message; } }
+$("pcEnabled").onchange = async () => {
+  const want = $("pcEnabled").checked;
+  try { renderPc(await pcApi({ enabled: want })); }
+  catch (e) { $("pcEnabled").checked = !want; toast("저장하지 못했습니다", e.message); }
+};
+$("pcSave").onclick = async () => {
+  const roots = $("pcRoots").value.split("\n").map(l => l.trim()).filter(Boolean);
+  const apps = {};
+  for (const line of $("pcApps").value.split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0 && line.slice(i + 1).trim()) apps[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  try { renderPc(await pcApi({ roots, apps })); $("pcMsg").textContent = "저장했습니다"; }
+  catch (e) { $("pcMsg").textContent = e.message; }
+};
+const OUTCOME = { ok: "완료", error: "실패", declined: "거절됨" };
+async function loadPcLog() {
+  const box = $("pcLog");
+  try {
+    const rows = await api("/api/pc/log?limit=50");
+    box.replaceChildren();
+    if (!rows.length) { box.textContent = "아직 기록이 없습니다."; return; }
+    for (const r of rows) {
+      const row = el("div", "logrow");
+      row.append(
+        el("span", "logwhen", String(r.ts).replace("T", " ").slice(5, 16)),
+        el("span", "logwhat", r.tool + " " + JSON.stringify(r.input)),
+        el("span", "logout " + r.outcome, (r.confirmed ? "확인 후 · " : "") + (OUTCOME[r.outcome] || r.outcome)),
+      );
+      box.appendChild(row);
+    }
+  } catch (e) { box.textContent = e.message; }
+}
+$("pcLogRefresh").onclick = loadPcLog;
 
 async function ping() {
   try { const r = await fetch("/api/health"); $("dot").classList.toggle("on", r.ok); }
