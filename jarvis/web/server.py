@@ -120,6 +120,11 @@ class Worker:
         return self._live[chat_id]
 
     def chat(self, chat_id: int | None, message: str, emit: Emit | None = None) -> dict[str, Any]:
+        """One turn of a chat. With emit, events stream out and "done" carries the reply.
+
+        A long chat is compacted afterwards on this same thread (so the right history is
+        summarized), but only after "done" has gone out: the answer never waits for it.
+        """
         j, store = self.jarvis, self.jarvis.store
         if chat_id is None or not store.chat_exists(chat_id):
             chat_id = store.new_chat(message)
@@ -143,7 +148,14 @@ class Worker:
         finally:
             j.on_event = previous
         store.add_chat_turn(chat_id, message, result.text, result.tool_calls)
-        return {"chat_id": chat_id, "text": result.text, "stop_reason": result.stop_reason, "tools": result.tool_calls}
+        reply = {"chat_id": chat_id, "text": result.text, "stop_reason": result.stop_reason, "tools": result.tool_calls}
+        if emit:
+            emit("done", reply)
+        compacted = j.compact_if_long()
+        if compacted:  # failures as warnings: the server only shows warnings and up
+            failed = compacted.startswith("compaction failed")
+            log.log(logging.WARNING if failed else logging.INFO, "chat %s: %s", chat_id, compacted)
+        return reply
 
     def chats(self) -> list[dict[str, Any]]:
         return self.jarvis.store.chats()
@@ -247,7 +259,7 @@ def create_app(build: Callable[[], Jarvis], token: str, proactive: bool | Callab
 
         def job() -> None:
             try:
-                emit("done", worker.chat(body.chat_id, body.message, emit))
+                worker.chat(body.chat_id, body.message, emit)  # emits "done" itself
             except Exception as e:  # surfaced to the chat window instead of a dropped connection
                 emit("error", {"message": f"{type(e).__name__}: {e}"})
 

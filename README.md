@@ -51,7 +51,7 @@ Claude API(Opus 5.5) 위에 **장기 기억 · 목표/계획 · 도구 실행 ·
                                    └─ 나: Whisper로 전사
                                          ├─ "자비스, …"로 시작: 명령으로 실행하고 음성으로 답함
                                          └─ 그 외: 음성 메모로 저장 (비슷한 말을 또 하면 언급 횟수 +1)
-15분마다 또는 메모 20개가 쌓이면 ─► 자비스가 메모 판단 (Claude 구조화 출력)
+15분마다 또는 메모 20개가 쌓이면 ─► 자비스가 메모 판단 (Claude Haiku 5.5 구조화 출력)
    · 메모별 중요도 1~5, 장기 기억으로 승격 / 메모로 유지 / 삭제
    · 말 속에서 새 목표와 단계별 계획을 만들고, 기존 계획 진행 상황을 갱신
    · 유지된 메모는 중요도별 보관 기간(1일·3일·7일·30일·영구)이 지나면 자동 삭제.
@@ -77,6 +77,8 @@ Claude API(Opus 5.5) 위에 **장기 기억 · 목표/계획 · 도구 실행 ·
 
 - 수집처는 처음 실행 때 생기는 `~/.jarvis/sources.json`을 고쳐서 추가하거나 뺍니다. RSS/Atom 피드면 됩니다.
 - **예의 바른 수집**: 피드 위주로 읽고, 본문을 받을 때는 robots.txt를 지키며, 같은 사이트에 1초 간격을 두고, 이미 받은 글은 건너뜁니다. 90일 지난 글은 지웁니다(`JARVIS_KNOWLEDGE_KEEP_DAYS`).
+- **안전한 수집**: 공개 인터넷 주소의 http(s)만 가져옵니다. 요청마다(리다이렉트 포함) 실제로 연결된 주소를 확인하고, 내 PC나 공유기 같은 사설망이면 아무것도 보내지 않고 끊습니다. `file://` 같은 링크는 저장하지 않습니다. 사설망을 가리키는 링크는 본문을 가져오지 않고 피드 요약만 저장합니다. 그래서 로컬·사설망 피드는 수집처로 쓸 수 없습니다. 이름 풀이를 프록시만 하는 네트워크에서는 프록시가 연결하므로 주소 확인을 프록시에 맡깁니다.
+- 아침 브리핑은 수집한 글 제목을 읽으므로 **읽기 전용 도구만** 씁니다. 브리핑 뒤에는 실제로 말한 브리핑 내용만 대화에 남기므로, 이어지는 음성 명령에 원문 제목이 따라가지 않습니다. 다만 직접 시키는 대화(음성 명령, 웹 채팅)는 모든 도구를 씁니다. 그 대화에서 검색 결과 속 지시문을 막는 일은 시스템 프롬프트에 맡깁니다.
 - 검색은 SQLite FTS5 trigram이라 한국어 단어 안쪽까지 찾습니다. 의미 기반 검색(임베딩)은 로드맵 v0.4에 있습니다.
 - 수집한 글은 신뢰할 수 없는 데이터로 취급하도록 시스템 프롬프트에 명시해, 글 속 지시문에 자비스가 휘둘리지 않게 했습니다.
 - 지금 바로 받으려면 `jarvis collect`. 본문 추출 품질을 높이려면 `pip install trafilatura`(없으면 기본 추출기 사용).
@@ -100,7 +102,7 @@ Claude API(Opus 5.5) 위에 **장기 기억 · 목표/계획 · 도구 실행 ·
 - 결과는 웹 앱의 🔔 자비스 알림에 쌓이고, 화면 알림과 브라우저 알림이 뜹니다. 상시 모드에서는 중요한 것(우선순위 2 이상)을 소리로 말합니다.
 - PC가 꺼져 있어 놓친 시각은 3시간 안이면 켜졌을 때 실행합니다.
 - 웹 앱의 "지금 생각해 보기" 버튼이나 `jarvis reflect`로 바로 실행할 수 있습니다. 시각은 `JARVIS_REFLECT_TIMES`로 바꾸고, 빈 값이면 끕니다.
-- 비용: 실행 1번에 구조화 출력 호출 1번(effort medium)이 듭니다.
+- 비용: 실행 1번에 Claude Sonnet 5.5 구조화 출력 호출 1번(effort medium)이 듭니다. 네트워크 오류로 실패하면 10분 뒤 다시 시도합니다.
 
 ## 시각 (객체탐지)
 
@@ -128,7 +130,7 @@ jarvis serve                      # 웹 앱 서버 (pip install -e '.[web]')
 pytest                            # 테스트 (네트워크·마이크 불필요)
 ```
 
-환경 변수: `JARVIS_MODEL`(기본 `claude-opus-5-5`), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`), `JARVIS_CAMERA`(빈 값이면 끔), `JARVIS_DETECTOR_WEIGHTS`(기본 `yolo11n.pt`), `JARVIS_VISION_EVERY_S`(기본 2), `JARVIS_COLLECT_TIME`(기본 `06:30`, 빈 값이면 끔), `JARVIS_KNOWLEDGE_KEEP_DAYS`(기본 90).
+환경 변수: `JARVIS_MODEL`(대화·음성 명령·브리핑, 기본 `claude-opus-5-5`), `JARVIS_MEMO_MODEL`(메모 판단, 기본 `claude-haiku-5-5`), `JARVIS_REFLECT_MODEL`(능동 사고, 기본 `claude-sonnet-5-5`; 두 값 모두 빈 값이면 `JARVIS_MODEL`), `JARVIS_COMPACT_AT_TOKENS`(대화가 이 토큰 수에 이르면 답을 전한 뒤 서버가 대화를 요약으로 압축, 기본 `80000`, `0`이면 끔. 실패하면 대화가 2만 토큰 더 늘어난 뒤 다시 시도), `JARVIS_EFFORT`(`low`~`max`, 기본 `high`), `JARVIS_HOME`(기본 `~/.jarvis`), `JARVIS_WEB_SEARCH=0`(웹 검색 끄기), `JARVIS_BRIEFING_TIME`(기본 `07:30`, 빈 값이면 끔), `JARVIS_CONSOLIDATE_MIN`, `JARVIS_CONSOLIDATE_AFTER`, `JARVIS_OWNER_THRESHOLD`, `JARVIS_WHISPER_MODEL`(기본 `small`), `JARVIS_LANGUAGE`(기본 `ko`), `JARVIS_CAMERA`(빈 값이면 끔), `JARVIS_DETECTOR_WEIGHTS`(기본 `yolo11n.pt`), `JARVIS_VISION_EVERY_S`(기본 2), `JARVIS_COLLECT_TIME`(기본 `06:30`, 빈 값이면 끔), `JARVIS_KNOWLEDGE_KEEP_DAYS`(기본 90).
 
 CLI 명령: `/profile`, `/memories [검색어]`, `/goals`, `/memos`, `/new`, `/think`(추론 요약 표시), `/quit`.
 
@@ -173,10 +175,11 @@ python portable/make_usb.py /media/me/USB --extras web,voice   # 음성 모드�
 | v0.1.3 | 매일 지식 수집(IT·수학·기계공학·일상), 전문 검색 도구, 브리핑에 새 자료 반영 |
 | v0.1.4 | USB 휴대형 실행(Windows/macOS/Linux 런처), 설치형 웹 앱(PWA), 챗봇형 채팅(실시간 스트리밍, 대화 기록 저장·이어하기), 토큰 인증 |
 | v0.2 | 내장 일정: 대화에서 자동 등록, 음성·브라우저 알림, 상황·브리핑 반영, 웹 일정 화면 |
-| **v0.3 (현재)** | 능동 사고: 하루 몇 번 스스로 상황을 돌아보고 챙길 것만 알림(음성·웹), 즉시 실행 버튼 |
+| v0.3 | 능동 사고: 하루 몇 번 스스로 상황을 돌아보고 챙길 것만 알림(음성·웹), 즉시 실행 버튼 |
+| **v0.3.1 (현재)** | 보안·안정성 수정(수집기 SSRF 차단, 브리핑 읽기 전용, 알림·능동 사고 버그), 작업별 모델 분리(메모 판단 Haiku, 능동 사고 Sonnet), 긴 대화 자동 압축(compaction) |
 | v0.3.x 연결 | 필요해지면 MCP로 외부 서비스(메일·노션·GitHub, 원하면 구글 캘린더 동기화) 연결 |
 | v0.3.x 회고 | 주간 회고, 대화 종료 시 자동 기억 정리·요약 |
-| v0.4 기억 고도화 | 임베딩 기반 의미 검색, 기억 중요도 감쇠/병합, 대화 compaction으로 긴 세션 유지 |
+| v0.4 기억 고도화 | 임베딩 기반 의미 검색, 기억 중요도 감쇠/병합 |
 | v0.5 인터페이스 | 자연스러운 TTS, 끼어들기(barge-in), 웹/모바일 UI, 알림 채널(텔레그램·슬랙) |
 | v0.6 다중 에이전트 | 리서치·코딩·일정 담당 하위 에이전트로 분업, 결과를 메인 에이전트가 검증 |
 

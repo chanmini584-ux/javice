@@ -16,6 +16,18 @@ ApproveFn = Callable[[str, dict[str, Any]], bool]
 EventFn = Callable[[str, dict[str, Any]], None]
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# On-demand compaction: the server replaces a long history with a summary block.
+COMPACT_BETA = "compact-2026-09-04"
+COMPACT_INSTRUCTIONS = (
+    "Summarize this conversation between the user and JARVIS, their personal assistant, so it can "
+    "continue from the summary alone. Keep what the user asked and decided, open requests and "
+    "promises, names, numbers, dates and times, the ids of goals, plan steps, schedule items and "
+    "memories that came up, and what tools found. Drop small talk. Write in the user's language. "
+    "Do not call tools; reply with the summary text only."
+)
+# After a failed compaction, wait until the conversation has grown this much before paying for
+# another try.
+COMPACT_RETRY_TOKENS = 20_000
 
 # The only tools a read-only (unattended) turn may see or run. Unattended runs such as the
 # morning briefing read text strangers wrote (feed titles, search results) with nobody
@@ -69,8 +81,12 @@ class Jarvis:
 
             register_knowledge_tools(self.registry, knowledge)
         # Conversation history is append-only: thinking blocks are bound to the exact
-        # history that produced them, so earlier turns are never edited.
+        # history that produced them, so earlier turns are never edited (only replaced
+        # whole by a compaction summary).
         self.messages: list[dict[str, Any]] = []
+        self._last_usage: Any = None
+        self._last_readonly = False
+        self._compact_retry = (0, 0)  # (id of the history list, tokens it must reach first)
 
     # -- request ---------------------------------------------------------------
 
@@ -80,20 +96,27 @@ class Jarvis:
             tools.append({"type": "web_search_20260209", "name": "web_search", "max_uses": 5})
         return tools
 
-    def _request(self, readonly: bool = False) -> Any:
-        params = dict(
+    def _params(self, readonly: bool) -> dict[str, Any]:
+        """Settings shared by turns and compaction: identical settings let both hit the prompt cache."""
+        return dict(
             model=self.settings.model,
-            max_tokens=self.settings.max_tokens,
             system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             tools=self._tools(readonly),
             messages=self.messages,
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": self.settings.effort},
-            # On a safety-classifier refusal, the API retries on a fallback model for us.
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
             # Cache the growing conversation prefix between steps and turns.
             cache_control={"type": "ephemeral"},
+        )
+
+    def _request(self, readonly: bool = False) -> Any:
+        params = dict(
+            self._params(readonly),
+            max_tokens=self.settings.max_tokens,
+            # On a safety-classifier refusal, the API retries on a fallback model for us.
+            # A history that starts with a compaction block needs the compaction beta.
+            betas=[FALLBACK_BETA] + ([COMPACT_BETA] if self._starts_with_summary() else []),
+            fallbacks="default",
         )
         with self.client.beta.messages.stream(**params) as stream:
             # Forward text as it is generated so chat UIs can show the answer typing out.
@@ -104,7 +127,11 @@ class Jarvis:
     # -- loop ------------------------------------------------------------------
 
     def ask(self, text: str, readonly: bool = False) -> TurnResult:
-        """readonly: an unattended turn over untrusted text; only READ_ONLY_TOOLS are offered and run."""
+        """Run one user turn. Front ends call compact_if_long() after delivering the answer.
+
+        readonly: an unattended turn over untrusted text; only READ_ONLY_TOOLS (plus web
+        search, which changes nothing here) are offered and run.
+        """
         mark = len(self.messages)
         try:
             return self._ask(text, readonly)
@@ -114,6 +141,7 @@ class Jarvis:
             raise
 
     def _ask(self, text: str, readonly: bool = False) -> TurnResult:
+        self._last_readonly = readonly
         self.messages.append(
             {
                 "role": "user",
@@ -127,6 +155,7 @@ class Jarvis:
         response = None
         for step in range(1, self.settings.max_steps + 1):
             response = self._request(readonly)
+            self._last_usage = getattr(response, "usage", None)
             self.messages.append({"role": "assistant", "content": response.content})
             for block in response.content:
                 if block.type == "thinking" and getattr(block, "thinking", ""):
@@ -176,6 +205,52 @@ class Jarvis:
     def reset(self) -> None:
         """Start a new conversation; long-term memory is kept."""
         self.messages = []
+
+    # -- compaction --------------------------------------------------------------
+
+    def _starts_with_summary(self) -> bool:
+        first = self.messages[0]["content"] if self.messages else None
+        return isinstance(first, list) and any(_block_type(b) == "compaction" for b in first)
+
+    def compact_if_long(self) -> str | None:
+        """Let the server replace a long conversation with a summary. Call it once an answer is out.
+
+        Quality and cost both suffer as a conversation grows. Returns what happened, or None
+        for a short conversation. The list is changed in place because the web app keeps one
+        history list per chat. A failure leaves the history as it was.
+        """
+        tokens = _context_tokens(self._last_usage)
+        limit = self.settings.compact_at_tokens
+        retry_list, retry_at = self._compact_retry
+        if not limit or tokens < limit or (retry_list == id(self.messages) and tokens < retry_at):
+            return None
+        try:
+            response = self.client.beta.messages.create(
+                **self._params(self._last_readonly),
+                max_tokens=16000,  # covers the model's thinking before it writes the summary
+                betas=[COMPACT_BETA],
+                compaction={"type": "summarize", "instructions": COMPACT_INSTRUCTIONS},
+            )
+            if response.stop_reason != "compaction" or not any(_block_type(b) == "compaction" for b in response.content):
+                raise RuntimeError(f"no summary came back ({response.stop_reason})")  # e.g. a refusal
+        except Exception as exc:
+            self._compact_retry = (id(self.messages), tokens + COMPACT_RETRY_TOKENS)
+            return f"compaction failed: {type(exc).__name__}: {exc}"
+        self.messages[:] = [{"role": "assistant", "content": response.content}]
+        self._last_usage, self._compact_retry = None, (0, 0)  # the summary starts the count afresh
+        return f"compacted a {tokens:,}-token conversation"
+
+
+def _block_type(block: Any) -> str | None:
+    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+
+
+def _context_tokens(usage: Any) -> int:
+    """Roughly the size of the next request: everything the last one read, plus its output."""
+    if usage is None:
+        return 0
+    fields = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
+    return sum(getattr(usage, f, 0) or 0 for f in fields)
 
 
 def _text_of(content: list[Any]) -> str:

@@ -139,7 +139,7 @@ class Consolidator:
             for m in pending
         )
         response = self.client.beta.messages.create(
-            model=self.settings.model,
+            model=self.settings.memo_model or self.settings.model,
             max_tokens=16000,
             system=_SYSTEM,
             messages=[

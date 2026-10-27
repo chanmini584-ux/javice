@@ -94,6 +94,20 @@ def test_consolidator_applies_decisions():
     assert "<memos>" in client.params["messages"][0]["content"]
 
 
+def test_memo_judgment_runs_on_the_memo_model():
+    # Consolidation runs up to every 15 minutes in always-on mode: a small model keeps it cheap.
+    store = MemoryStore()
+    store.add_memo("우유 사기", now=T0)
+    empty = {"memos": [], "new_goals": [], "step_updates": []}
+    client = FakeClient(empty)
+    Consolidator(client, store, Settings()).run(now=T0)
+    assert client.params["model"] == "claude-haiku-5-5"
+    store.add_memo("세탁소 들르기", now=T0)
+    client = FakeClient(empty)
+    Consolidator(client, store, Settings(memo_model="")).run(now=T0)
+    assert client.params["model"] == "claude-opus-5-5"  # empty: use the main model
+
+
 def test_consolidator_skips_repeated_goals_and_keeps_goals_with_vague_deadlines():
     store = MemoryStore()
     store.add_goal("영어 공부", "이직")
@@ -165,6 +179,15 @@ def test_daemon_memos_commands_and_strangers():
     assert [m.text for m in d.store.memos()] == ["우유 사야 해"]
     assert d.others_heard == 1
     assert "오늘 일정 알려줘" in jarvis.asked[0] and speaker.said
+
+
+def test_voice_answer_is_spoken_before_the_conversation_is_compacted():
+    d, jarvis, speaker, _ = make_daemon(lambda: T0, briefing_time="")
+    order = []
+    speaker.say = lambda text: order.append("say")
+    jarvis.compact_if_long = lambda: order.append("compact") or "compacted a 90,000-token conversation"
+    d.handle(utt("자비스, 아까 얘기 계속해줘"))
+    assert order == ["say", "compact"]
 
 
 def test_voice_conversation_starts_fresh_after_a_quiet_gap():
