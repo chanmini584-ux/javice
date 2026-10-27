@@ -50,3 +50,11 @@ def test_goals_and_plans(store):
     assert store.goals("active") == []
     with pytest.raises(ValueError):
         store.save_plan(999, ["x"])
+
+
+def test_goal_deadline_must_be_a_date(store):
+    # Deadlines are compared and sorted as text; "다음 주" would sort after every real date.
+    with pytest.raises(ValueError):
+        store.add_goal("발표 준비", "학점", "다음 주")
+    gid = store.add_goal("발표 준비", "학점", "2026-10-31T18:00")
+    assert store.goals()[0].id == gid and store.goals()[0].deadline == "2026-10-31"

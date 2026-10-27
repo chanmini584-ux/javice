@@ -18,12 +18,14 @@ from .agent import FALLBACK_BETA
 from .briefing import parse_time
 from .config import Settings
 from .memory import MemoryStore, local_naive
-from .prompts import situation_block
+from .prompts import data_line, situation_block
 
 LAST_SLOT_KEY = "last_reflection_slot"
 MAX_NOTICES = 3
 # A slot missed while the PC was off still runs if it is this recent; older ones are skipped.
 CATCH_UP = timedelta(hours=3)
+# After a failed run (e.g. network down) the slot stays open and is retried this much later.
+RETRY_AFTER = timedelta(minutes=10)
 KINDS = ("deadline", "schedule", "plan", "followup", "knowledge", "wellbeing", "other")
 
 _SYSTEM = """\
@@ -95,14 +97,16 @@ class Reflector:
         self.settings = settings
         self.knowledge = knowledge
         self.times = parse_times(settings.reflect_times) if settings.reflect_times else []
+        self._retry_at: datetime | None = None
 
-    def claim(self, now: datetime) -> bool:
-        """True (and the slot is recorded) when a scheduled reflection is due now."""
-        slot = due_slot(now, self.times, self.store.get_state(LAST_SLOT_KEY)) if self.times else None
-        if slot is None:
+    def _open_slot(self, now: datetime) -> str | None:
+        return due_slot(now, self.times, self.store.get_state(LAST_SLOT_KEY)) if self.times else None
+
+    def due(self, now: datetime) -> bool:
+        """A scheduled reflection is due now and not waiting out a failed attempt."""
+        if self._retry_at is not None and local_naive(now) < self._retry_at:
             return False
-        self.store.set_state(LAST_SLOT_KEY, slot)
-        return True
+        return self._open_slot(now) is not None
 
     def material(self, now: datetime) -> str:
         store, local = self.store, local_naive(now)
@@ -124,7 +128,7 @@ class Reflector:
             docs = self.knowledge.recent(now - timedelta(days=1), limit=15)
             parts.append(
                 "<new_articles>\n"
-                + ("\n".join(f"- [{d.topic}] {d.title} ({d.source})" for d in docs) or "(none)")
+                + ("\n".join(f"- [{d.topic}] {data_line(d.title)} ({data_line(d.source)})" for d in docs) or "(none)")
                 + "\n</new_articles>"
             )
         recent = store.notices(limit=15)
@@ -136,7 +140,20 @@ class Reflector:
         return "\n\n".join(parts)
 
     def run(self, now: datetime | None = None) -> list[dict]:
+        """Reflect now. On success the due slot (if any) is done; on failure it is retried later."""
         now = now or datetime.now().astimezone()
+        try:
+            saved = self._think(now)
+            slot = self._open_slot(now)
+            if slot is not None:  # recorded inside the try: a failed write must not mean "run again now"
+                self.store.set_state(LAST_SLOT_KEY, slot)
+        except Exception:
+            self._retry_at = local_naive(now) + RETRY_AFTER
+            raise
+        self._retry_at = None
+        return saved
+
+    def _think(self, now: datetime) -> list[dict]:
         response = self.client.beta.messages.create(
             model=self.settings.model,
             max_tokens=8000,

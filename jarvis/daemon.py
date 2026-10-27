@@ -22,7 +22,21 @@ from .voice.listener import VoiceListener
 
 WAKE_WORD = re.compile(r"^\s*(?:헤이\s*)?(?:자비스|자빗|jarvis)[\s,.!?~]*", re.IGNORECASE)
 LAST_BRIEFING_KEY = "last_briefing_date"
+BRIEFING_TURN = "(아침 브리핑을 해줘)"
 LAST_COLLECT_KEY = "last_collect_date"
+# A voice command after this much quiet starts a new conversation (long-term memory stays),
+# so the always-on conversation does not grow all day and make every command costlier.
+VOICE_SESSION_GAP = timedelta(minutes=30)
+
+
+def _until(minutes: int) -> str:
+    """How far away something is, the way a person says it: "7일 뒤", "1시간 30분 뒤"."""
+    if minutes <= 0:
+        return "지금"
+    days, rest = divmod(minutes, 24 * 60)
+    hours, mins = divmod(rest, 60)
+    parts = [f"{days}일" if days else "", f"{hours}시간" if hours else "", f"{mins}분" if mins and not days else ""]
+    return " ".join(p for p in parts if p) + " 뒤"
 
 
 def _in_background(job: Callable[[], None]) -> None:
@@ -64,6 +78,7 @@ class Daemon:
         self.consolidate_every = timedelta(minutes=s.consolidate_every_min)
         self.consolidate_after = s.consolidate_after_memos
         self.last_consolidation = self.clock()
+        self._last_turn_at: datetime | None = None
         self.others_heard = 0
         self._brief_retry_at: datetime | None = None
         self.vision_every = timedelta(seconds=s.vision_every_s)
@@ -84,6 +99,10 @@ class Daemon:
             command = utt.text[match.end() :].strip()
             if command:
                 self.log(f"command: {command}")
+                now = self.clock()
+                if self._last_turn_at is not None and now - self._last_turn_at > VOICE_SESSION_GAP:
+                    self.jarvis.reset()
+                self._last_turn_at = now
                 result = self.jarvis.ask(f"(음성 명령, 짧게 말로 답해줘) {command}")
                 self.speaker.say(result.text)
             return
@@ -111,7 +130,7 @@ class Daemon:
         pending = len(self.store.memos(status="pending", limit=self.consolidate_after))
         if pending and (pending >= self.consolidate_after or now - self.last_consolidation >= self.consolidate_every):
             self.consolidate(now)
-        if self.reflector is not None and not self._collecting.is_set() and self.reflector.claim(now):
+        if self.reflector is not None and not self._collecting.is_set() and self.reflector.due(now):
             self.reflect(now)
         if (
             self.briefing_at
@@ -130,8 +149,7 @@ class Daemon:
         """Say each schedule reminder once, when its window opens."""
         for item in self.store.reminders_due(now):
             self.store.mark_reminded(item.id, now)
-            mins = round((item.start_dt - local_naive(now)).total_seconds() / 60)
-            when = f"{mins}분 뒤" if mins > 0 else "지금"
+            when = _until(round((item.start_dt - local_naive(now)).total_seconds() / 60))
             place = f", 장소는 {item.location}" if item.location else ""
             self.log(f"reminder: {item.describe()}")
             self.store.add_event("schedule", "reminder", item.describe(), at=now)
@@ -190,7 +208,15 @@ class Daemon:
         now = now or self.clock()
         self.consolidate(now)  # fold in last night's memos first
         self.jarvis.reset()  # a new day starts a new conversation; long-term memory stays
-        text = self.jarvis.ask(briefing_prompt(self.store, now, self.jarvis.knowledge)).text
+        # Read-only: the prompt carries collected article titles and nobody is watching.
+        text = self.jarvis.ask(briefing_prompt(self.store, now, self.jarvis.knowledge), readonly=True).text
+        # Keep the briefing as it was said, not the prompt behind it: voice commands that follow
+        # may use every tool and should not carry the collected titles along. An empty answer
+        # leaves nothing (an empty assistant turn would make later requests fail).
+        self.jarvis.reset()
+        if text.strip():
+            self.jarvis.messages = [{"role": "user", "content": BRIEFING_TURN}, {"role": "assistant", "content": text}]
+        self._last_turn_at = now  # "아까 브리핑에서…" follow-ups keep the briefing in context
         self.store.set_state(LAST_BRIEFING_KEY, now.date().isoformat())
         self.speaker.say(text)
         return text

@@ -20,6 +20,8 @@ MEMO_STATUSES = ("pending", "kept", "promoted")
 SCHEDULE_STATUSES = ("scheduled", "done", "cancelled")
 # A reminder still fires this long after the start time (e.g. the PC was asleep), never later.
 REMINDER_GRACE = timedelta(minutes=10)
+# The longest reminder lead time (the web form's limit too); larger values are capped.
+MAX_REMIND_MIN = 7 * 24 * 60
 
 # How long a voice memo survives without being mentioned again, by importance.
 # None = keep until JARVIS or the user removes it. Re-mentioning resets the clock.
@@ -155,6 +157,11 @@ class Memo:
 def local_naive(dt: datetime) -> datetime:
     """Schedule times are the user's wall-clock time on this PC."""
     return dt.astimezone().replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def _lead(minutes) -> int:
+    """A reminder lead time within 0..MAX_REMIND_MIN (rows saved before the cap included)."""
+    return max(0, min(int(minutes), MAX_REMIND_MIN))
 
 
 def parse_when(value: str) -> tuple[str, bool]:
@@ -293,6 +300,8 @@ class MemoryStore:
     # --- goals & plans -----------------------------------------------------
 
     def add_goal(self, title: str, why: str = "", deadline: str | None = None) -> int:
+        if deadline:  # stored as YYYY-MM-DD: deadlines are compared and sorted as text
+            deadline = parse_when(deadline)[0][:10]
         with self._db:
             cur = self._db.execute(
                 "INSERT INTO goals(title, why, deadline, created_at) VALUES (?, ?, ?, ?)",
@@ -463,7 +472,7 @@ class MemoryStore:
             cur = self._db.execute(
                 "INSERT INTO schedule(title, start, end, location, notes, remind_min, created_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (title.strip(), start_text, end_text, location, notes, 0 if all_day else max(0, remind_min), _now()),
+                (title.strip(), start_text, end_text, location, notes, 0 if all_day else _lead(remind_min), _now()),
             )
         return int(cur.lastrowid)
 
@@ -497,7 +506,7 @@ class MemoryStore:
         if fields.get("end"):
             updates["end"] = parse_when(fields["end"])[0]
         if fields.get("remind_min") is not None:
-            updates["remind_min"] = max(0, int(fields["remind_min"]))
+            updates["remind_min"] = _lead(fields["remind_min"])
             updates["reminded_at"] = None
         if fields.get("status") is not None:
             if fields["status"] not in SCHEDULE_STATUSES:
@@ -513,13 +522,18 @@ class MemoryStore:
     def reminders_due(self, now: datetime, include_reminded: bool = False) -> list[ScheduleItem]:
         """Timed items inside their reminder window: start - remind_min <= now <= start + grace."""
         now = local_naive(now)
-        items = self.schedule(now - REMINDER_GRACE, days=2)
+        # Look as far ahead as the longest reminder lead time (they can be days ahead).
+        (lead,) = self._db.execute(
+            "SELECT COALESCE(MAX(remind_min), 0) FROM schedule WHERE status = 'scheduled'"
+        ).fetchone()
+        first, last = now - REMINDER_GRACE, now + timedelta(minutes=_lead(lead))
+        items = self.schedule(first, days=(last.date() - first.date()).days + 1)
         due = []
         for item in items:
             if item.all_day or (item.reminded_at and not include_reminded):
                 continue
             start = item.start_dt
-            if start - timedelta(minutes=item.remind_min) <= now <= start + REMINDER_GRACE:
+            if start - timedelta(minutes=_lead(item.remind_min)) <= now <= start + REMINDER_GRACE:
                 due.append(item)
         return due
 
