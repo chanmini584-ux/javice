@@ -347,3 +347,23 @@ def test_module_entry_point_uses_exit_now():
     import jarvis.desktop as pkg
 
     assert "exit_now" in (pathlib.Path(pkg.__file__).parent / "__main__.py").read_text(encoding="utf-8")
+
+
+def test_no_tray_mode_runs_headless_until_interrupted(tmp_path):
+    f = Flow(tmp_path)
+    waited = []
+    from jarvis.desktop.app import run as run_app
+
+    rc = run_app(
+        ["--no-tray"],
+        settings=f.settings,
+        handle_factory=lambda s, port: f.handle,
+        run_tray=lambda a: pytest.fail("tray must not start"),
+        ensure_key=lambda s: True,
+        running=lambda port: False,
+        open_window=f.windows.append,
+        show_error=lambda t, m: f.errors.append((t, m)),
+        autostart=FakeAutostart(),
+        wait_forever=lambda: waited.append(1),
+    )
+    assert rc == 0 and waited == [1] and f.handle.events == ["start", "stop"]

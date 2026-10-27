@@ -104,6 +104,15 @@ def make_icon(size: int = 64):
     return img.resize((size, size), Image.LANCZOS)
 
 
+def save_ico(path, sizes=(16, 24, 32, 48, 64, 128, 256)):
+    """Write a multi-size Windows .ico (used for the exe, the installer and shortcuts)."""
+    from pathlib import Path
+
+    out = Path(path)
+    make_icon(max(sizes)).save(out, format="ICO", sizes=[(s, s) for s in sizes])
+    return out
+
+
 def build_menu(actions: TrayActions):
     import pystray
 

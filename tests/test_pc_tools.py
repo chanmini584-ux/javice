@@ -443,3 +443,19 @@ def test_system_prompt_tells_the_model_how_pc_control_is_gated():
     from jarvis.prompts import SYSTEM_PROMPT
 
     assert "pc_*" in SYSTEM_PROMPT and "do not ask permission" in SYSTEM_PROMPT
+
+
+def test_unattended_runs_never_get_pc_tools(tmp_path):
+    """Briefings and proactive thinking read untrusted articles; they must not be able to touch the PC."""
+    from jarvis.agent import READ_ONLY_TOOLS, Jarvis
+    from jarvis.config import Settings
+    from jarvis.memory import MemoryStore
+
+    j = Jarvis(Settings(data_dir=tmp_path, enable_web_search=False), store=MemoryStore(), client=object())
+    pc_names = {d["name"] for d in j.registry.definitions() if d["name"].startswith("pc_")}
+    assert len(pc_names) == 8
+    assert not pc_names & set(READ_ONLY_TOOLS)
+    offered = {t["name"] for t in j._tools(readonly=True)}
+    assert not offered & pc_names
+    out = j._run_tools([NS(type="tool_use", id="1", name="pc_delete_files", input={"paths": ["x"]})], [], readonly=True)
+    assert out[0]["is_error"] is True and "unattended" in out[0]["content"]

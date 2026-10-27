@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 from typing import Any, Callable
 
 from ..config import Settings
@@ -14,6 +15,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="jarvis-desktop")
     p.add_argument("--background", action="store_true", help="start in the tray without opening a window")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-tray", action="store_true", help="troubleshooting: run without a tray icon (Ctrl+C to quit)")
     return p.parse_args(argv)
 
 
@@ -28,6 +30,13 @@ def setup_stdio(data_dir, stdout: Any, stderr: Any) -> tuple[Any, Any]:
     return (stdout if stdout is not None else f), (stderr if stderr is not None else f)
 
 
+def _wait_forever() -> None:
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        pass
+
+
 def run(
     argv: list[str],
     *,
@@ -39,6 +48,7 @@ def run(
     open_window: Callable[[str], None],
     show_error: Callable[[str, str], None],
     autostart: Any,
+    wait_forever: Callable[[], None] = _wait_forever,
 ) -> int:
     from ..pc.store import PcSettingsStore
     from .tray import TrayActions
@@ -68,7 +78,10 @@ def run(
             )
 
         try:
-            run_tray(make_actions)
+            if args.no_tray:
+                wait_forever()
+            else:
+                run_tray(make_actions)
         except Exception as exc:  # never leave a server running with no way to quit it
             show_error("트레이 아이콘을 만들지 못했습니다", f"{type(exc).__name__}: {exc}")
             return 1
@@ -111,3 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         show_error=keys.show_error,
         autostart=Autostart(),
     )
+
+
+def entry() -> None:
+    """Console/GUI script and PyInstaller entry point."""
+    exit_now(main())
