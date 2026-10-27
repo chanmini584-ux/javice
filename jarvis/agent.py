@@ -9,7 +9,7 @@ import anthropic
 
 from .config import Settings
 from .memory import MemoryStore
-from .pc.store import AuditLog
+from .pc.tools import PcControl, register_pc_tools
 from .prompts import SYSTEM_PROMPT, situation_block
 from .tools import ToolRegistry, register_builtin_tools
 
@@ -72,8 +72,10 @@ class Jarvis:
         self.approve = approve
         self.on_event = on_event
         self.registry = ToolRegistry()
-        self.pc_audit = AuditLog(self.settings.data_dir / "pc_audit.jsonl")
         register_builtin_tools(self.registry, self.store)
+        self.pc = PcControl(self.settings.data_dir)
+        self.pc_audit = self.pc.audit
+        register_pc_tools(self.registry, self.pc)
         self.eyes = eyes
         if eyes is not None:
             eyes.register_tools(self.registry)
