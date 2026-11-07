@@ -169,6 +169,13 @@ python portable/make_usb.py /media/me/USB --extras web,voice   # 음성 모드�
 
 터미널 없이 **설치 → 아이콘 더블클릭**으로 쓰는 윈도우 앱입니다. 같은 서버와 웹 앱(PWA)을 앱 창으로 보여 주고, 트레이에 상주합니다.
 
+**가장 쉬운 설치** (빌드 없이, cmd에서 두 줄)
+```
+curl -L -o "%USERPROFILE%\jarvis-setup.bat" https://raw.githubusercontent.com/chanmini584-ux/javice/main/portable/install-windows.bat
+"%USERPROFILE%\jarvis-setup.bat"
+```
+uv·Git이 없으면 설치하고, 코드를 `%USERPROFILE%\javice`에 받거나 최신으로 갱신한 뒤, **바탕 화면과 시작 메뉴에 JARVIS 아이콘**을 만들고 앱을 엽니다. 다시 실행하면 업데이트됩니다.
+
 **설치 파일 만들기** (Windows 또는 GitHub Actions)
 - GitHub: 저장소의 **Actions → Windows installer → Run workflow**. 테스트가 통과하면 `JARVIS-Setup-<버전>.exe`가 아티팩트로 올라옵니다(`v*` 태그를 푸시하면 릴리스에도 첨부).
 - 내 PC에서: `pip install -e ".[web,desktop]" pyinstaller` 후 `powershell -File packaging/build_windows.ps1` (Inno Setup 6 필요, 없으면 Chocolatey로 설치). 결과는 `dist-installer/`.
@@ -176,9 +183,10 @@ python portable/make_usb.py /media/me/USB --extras web,voice   # 음성 모드�
 **사용**
 - 설치 마법사에서 "바탕 화면 아이콘", "Windows 시작 시 자동 실행"을 고를 수 있습니다. 관리자 권한은 필요 없습니다(사용자별 설치).
 - 처음 실행하면 Anthropic API 키를 한 번 묻습니다(저장은 선택). 이후 앱 창이 열리고 트레이에 아이콘이 생깁니다. 창을 닫아도 트레이에서 계속 동작합니다.
-- 트레이 메뉴: **JARVIS 열기 / 음성 모드 / PC 제어 허용 / Windows 시작 시 자동 실행 / 종료**. 자동 실행은 설치 때 고른 것과 같은 항목(HKCU Run)을 켜고 끕니다.
+- 트레이 메뉴: **JARVIS 열기 / 폰에서 쓰기 / 음성 모드 / PC 제어 허용 / Windows 시작 시 자동 실행 / 종료**. 자동 실행은 설치 때 고른 것과 같은 항목(HKCU Run)을 켜고 끕니다.
 - 앱 창은 Edge(없으면 Chrome)의 앱 모드이고, 화면은 폰에서 쓰는 PWA와 같습니다. 아침 브리핑·지식 수집·메모 정리·능동 사고는 앱이 켜져 있는 동안 백그라운드 비서가 맡습니다.
-- 서버는 이 PC(127.0.0.1)에서만 열립니다. 폰 접속은 위 "USB 휴대형 + 웹 앱" 방식을 쓰세요.
+- 서버는 이 PC(127.0.0.1)에서만 열립니다.
+- **폰에서 쓰기**: PC와 폰에 [Tailscale](https://tailscale.com/download)(무료)을 같은 계정으로 깔아 두고 트레이의 "폰에서 쓰기"를 누르면, `tailscale serve --bg <포트>`로 내 기기끼리만 열리는 HTTPS 주소를 만들고 QR 페이지를 엽니다. 폰으로 QR을 찍어 열고 "홈 화면에 추가"(iOS) 또는 "앱 설치"(Android)를 누르면 폰 앱이 됩니다. Tailscale이 없거나, 로그인이 안 됐거나, 계정에서 HTTPS가 꺼져 있으면 그 페이지가 남은 할 일을 알려 줍니다. 인터넷에는 공개되지 않으며, 끊으려면 `tailscale serve reset`.
 - 문제가 생기면 `JARVIS.exe --no-tray`(트레이 없이 실행), 로그는 `%USERPROFILE%\.jarvis\logs\desktop.log`.
 
 **음성 모드**: 트레이의 "음성 모드"는 백그라운드 비서를 음성 포함으로 다시 시작합니다. 설치 파일 기본 빌드는 용량 때문에 음성 라이브러리(torch 등)를 **포함하지 않으므로**, 이때는 켤 수 없다는 알림이 뜨고 텍스트 비서는 계속 동작합니다. 음성까지 담으려면 `pip install ".[voice]"` 후 `JARVIS_BUILD_VOICE=1`로 빌드하세요(수 GB). 채팅 화면의 🎤 입력과 🔊 읽어주기는 브라우저 기능이라 기본 빌드에서도 됩니다.
