@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import threading
+import webbrowser
 from typing import Any, Callable
 
 from ..config import Settings
@@ -72,9 +73,15 @@ def run(
         if not args.background:
             open_window(handle.url)
 
+        def show_phone() -> None:
+            from . import phone
+
+            phone.show(settings.data_dir, args.port, handle.token, webbrowser.open)  # a plain browser tab: the QR page is a file
+
         def make_actions(notify, stop_tray) -> TrayActions:
             return TrayActions(
-                handle, autostart, PcSettingsStore(settings.data_dir / "pc_control.json"), notify, open_window, stop_tray
+                handle, autostart, PcSettingsStore(settings.data_dir / "pc_control.json"), notify, open_window, stop_tray,
+                phone=show_phone,
             )
 
         try:

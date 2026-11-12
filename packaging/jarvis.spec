@@ -16,6 +16,7 @@ hiddenimports = (
     + collect_submodules("uvicorn")
     + collect_submodules("pystray")
     + collect_submodules("anthropic")
+    + collect_submodules("qrcode")  # the phone-connection QR page
     + ["PIL.Image", "PIL.ImageDraw", "tkinter", "tkinter.messagebox", "tkinter.simpledialog"]
 )
 datas = collect_data_files("jarvis", includes=["web/static/*"])  # the web app (index.html, manifest, icon)

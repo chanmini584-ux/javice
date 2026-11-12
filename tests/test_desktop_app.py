@@ -157,6 +157,36 @@ def test_quit_stops_the_tray(parts):
     assert stopped == [1]
 
 
+def test_phone_runs_in_the_background_and_reports_failures(parts, monkeypatch):
+    import threading
+
+    actions, *_rest = parts
+    notes = parts[4]
+    done = threading.Event()
+
+    def broken():
+        try:
+            raise OSError("no tailscale service")
+        finally:
+            done.set()
+
+    actions._phone = broken
+    actions.phone()
+    assert done.wait(2)
+    for _ in range(100):  # the failure note is posted right after the call returns
+        if len(notes) >= 2:
+            break
+        threading.Event().wait(0.01)
+    assert notes[0][0] == "폰에서 쓰기"
+    assert notes[1][0] == "폰 연결을 준비하지 못했습니다" and "no tailscale service" in notes[1][1]
+
+
+def test_phone_without_a_connector_explains_instead_of_crashing(parts):
+    actions, *_rest = parts
+    actions.phone()
+    assert parts[4] == [("폰에서 쓰기", "이 실행 방식에서는 폰 연결을 쓸 수 없습니다.")]
+
+
 # --- the tray menu ----------------------------------------------------------
 
 
@@ -167,7 +197,7 @@ def test_menu_has_the_expected_entries_and_reflects_state(parts):
     actions, _, auto, store, *_ = parts
     menu = build_menu(actions)
     items = [i for i in menu.items if i.text and not set(i.text) <= set("- ")]
-    assert [i.text for i in items] == ["JARVIS 열기", "음성 모드", "PC 제어 허용", "Windows 시작 시 자동 실행", "종료"]
+    assert [i.text for i in items] == ["JARVIS 열기", "폰에서 쓰기", "음성 모드", "PC 제어 허용", "Windows 시작 시 자동 실행", "종료"]
     state = {i.text: i.checked for i in items}
     assert state["PC 제어 허용"] is False and state["Windows 시작 시 자동 실행"] is False
     store.update(enabled=True)

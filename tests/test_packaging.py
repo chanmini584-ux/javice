@@ -99,3 +99,15 @@ def test_build_outputs_are_git_ignored():
     ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     for pattern in ("dist/", "build/", "dist-installer/", "*.ico"):
         assert pattern in ignore
+
+
+def test_one_click_windows_setup_makes_app_shortcuts():
+    raw = (ROOT / "portable" / "install-windows.bat").read_bytes()
+    assert raw.isascii(), "cmd reads .bat files in the console code page: keep it ASCII"
+    assert b"\r\n" in raw and raw.count(b"\n") == raw.count(b"\r\n"), "cmd needs CRLF line endings"
+    bat = raw.decode()
+    gui = pyproject()["project"]["gui-scripts"]
+    assert "jarvis-desktop" in gui and "jarvis-desktop.exe" in bat  # the windowless app, not the console server
+    assert "--extra desktop" in bat and "-b main" in bat and "origin/main" in bat
+    assert "CreateShortcut" in bat and "'Desktop'" in bat and "'Programs'" in bat
+    assert "save_ico" in bat

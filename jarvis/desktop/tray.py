@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable
 
 from ..pc.store import PcSettingsStore
@@ -18,9 +19,11 @@ class TrayActions:
         notify: Notify,
         open_window: Callable[[str], None],
         stop_tray: Callable[[], None],
+        phone: Callable[[], Any] | None = None,
     ) -> None:
         self.handle, self.autostart, self.pc_store = handle, autostart, pc_store
         self.notify, self._open_window, self._stop_tray = notify, open_window, stop_tray
+        self._phone = phone
 
     # -- state shown as check marks ---------------------------------------------
 
@@ -75,6 +78,21 @@ class TrayActions:
         except Exception as exc:  # e.g. blocked by a policy or security software
             self.notify("자동 실행을 바꾸지 못했습니다", str(exc))
 
+    def phone(self) -> None:
+        """Connect the phone in the background (Tailscale can take a few seconds); the result opens as a page."""
+        if self._phone is None:
+            self.notify("폰에서 쓰기", "이 실행 방식에서는 폰 연결을 쓸 수 없습니다.")
+            return
+        self.notify("폰에서 쓰기", "폰 연결을 준비하고 있습니다. 잠시 뒤 안내 페이지가 열립니다.")
+
+        def work() -> None:
+            try:
+                self._phone()
+            except Exception as exc:
+                self.notify("폰 연결을 준비하지 못했습니다", f"{type(exc).__name__}: {exc}")
+
+        threading.Thread(target=work, name="jarvis-phone", daemon=True).start()
+
     def quit(self) -> None:
         self._stop_tray()
 
@@ -119,6 +137,7 @@ def build_menu(actions: TrayActions):
     item = pystray.MenuItem
     return pystray.Menu(
         item("JARVIS 열기", lambda: actions.open(), default=True),
+        item("폰에서 쓰기", lambda: actions.phone()),
         item("음성 모드", lambda: actions.toggle_voice(), checked=lambda i: actions.voice_on),
         item("PC 제어 허용", lambda: actions.toggle_pc_control(), checked=lambda i: actions.pc_on),
         item(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import re
 import socket
 import time
 import urllib.request
@@ -43,6 +44,11 @@ def _resolve(host: str, port: int) -> list[str]:
     return [info[4][0] for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
 
 
+# Hosts made only of numbers ("127.1", "2130706433", "0x7f.1"). Resolvers disagree on what these
+# mean (Linux reads them as IPv4 addresses, Windows refuses them, a proxy may do either), so only a
+# plain dotted quad is accepted and checked like any other address.
+_NUMERIC_HOST = re.compile(r"^(0x[0-9a-f]*|[0-9]+)(\.(0x[0-9a-f]*|[0-9]+))*\.?$", re.IGNORECASE)
+
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
 
@@ -69,6 +75,11 @@ def check_url(url: str, resolve: Resolve = _resolve, proxied: bool = False) -> N
         raise UnsafeURLError(f"only http(s) URLs are fetched: {url!r}")
     if "%" in host:  # urllib connects to the decoded name, not the one checked here
         raise UnsafeURLError(f"encoded host name in {url!r}")
+    if _NUMERIC_HOST.match(host):
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            raise UnsafeURLError(f"non-standard numeric address in {url!r}") from None
     try:
         port = parts.port or (443 if parts.scheme == "https" else 80)
     except ValueError as exc:

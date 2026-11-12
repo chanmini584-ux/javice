@@ -136,6 +136,24 @@ def test_check_url_refuses_local_and_private_targets(url):
         check_url(url)
 
 
+@pytest.mark.parametrize("host", ["127.1", "2130706433", "0x7f.1", "0177.0.0.1", "8.8.8.010", "1.2.3"])
+def test_numeric_shorthand_hosts_are_refused_without_resolving(host):
+    # Linux reads these as IPv4, Windows refuses them, a proxy may do either: never let one through.
+    def resolve(h, port):
+        raise AssertionError("must not be resolved")
+
+    for proxied in (False, True):
+        with pytest.raises(UnsafeURLError):
+            check_url(f"http://{host}/", resolve=resolve, proxied=proxied)
+
+
+def test_plain_dotted_quads_and_names_with_digits_still_resolve():
+    seen = []
+    check_url("http://8.8.8.8/", resolve=lambda h, p: seen.append(h) or ["8.8.8.8"])
+    check_url("http://123.example.com/", resolve=lambda h, p: seen.append(h) or ["93.184.216.34"])
+    assert seen == ["8.8.8.8", "123.example.com"]
+
+
 def test_check_url_refuses_names_that_resolve_to_the_home_network():
     with pytest.raises(UnsafeURLError):
         check_url("http://my-router.example/", resolve=lambda host, port: ["93.184.216.34", "192.168.0.1"])
